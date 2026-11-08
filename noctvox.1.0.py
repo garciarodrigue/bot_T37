@@ -1,51 +1,64 @@
 import os
 import telebot
 from flask import Flask
-import requests
+from google import genai
 
-TOKEN = os.environ.get('BOT_TOKEN')
-TERMUX_BRIDGE_URL = os.environ.get('TERMUX_BRIDGE_URL') # URL pública de Cloudflare + /exec
-SECRET_TOKEN = "clave_secreta_super_segura_123"
+# Inicializar tokens y cliente
+TELEGRAM_TOKEN = os.environ.get('BOT_TOKEN')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+client = genai.Client(api_key=GEMINI_API_KEY)
+
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Servidor central en Render activo."
+    return "Bot con Gemini en Render activo y operando 24/7."
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "🤖 Nodo central en Render activo. Usa `/ls` para consultar el nodo local en Termux.", parse_mode="Markdown")
+    welcome_text = (
+        "🤖 *¡Hola! Soy tu bot con Inteligencia Artificial (Gemini).* 🚀\n\n"
+        "Estoy ejecutándome 24/7 en la nube de Render.\n"
+        "Puedes escribirme directamente cualquier pregunta, duda o tarea y te responderé usando IA."
+    )
+    bot.reply_to(message, welcome_text, parse_mode="Markdown")
 
-@bot.message_handler(commands=['ls', 'cmd'])
-def handle_remote_command(message):
-    if not TERMUX_BRIDGE_URL:
-        bot.reply_to(message, "⚠️ El nodo periférico (Termux) no está vinculado en las variables de entorno.")
-        return
-        
-    command_to_run = "ls -la" if message.text == "/ls" else message.text.replace("/cmd", "").strip()
+# Manejador para cualquier texto que no sea un comando explícito
+@bot.message_handler(func=lambda message: True)
+def handle_ai_chat(message):
+    user_text = message.text
     
-    bot.reply_to(message, f"🔄 Solicitando ejecución a nodo local: `{command_to_run}`...", parse_mode="Markdown")
+    # Mostrar un aviso de que la IA está procesando
+    processing_msg = bot.reply_to(message, "🧠 Pensando respuesta...")
     
     try:
-        payload = {
-            "secret": SECRET_TOKEN,
-            "cmd": command_to_run
-        }
+        # Generar respuesta usando el modelo estándar de Gemini
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=user_text,
+        )
         
-        # Petición saliente desde Render hacia tu Termux mediante el túnel
-        response = requests.post(TERMUX_BRIDGE_URL, json=payload, timeout=12)
-        data = response.json()
-        output = data.get("output", "Sin respuesta del nodo local.")
+        reply_text = response.text
         
-        if len(output) > 4000:
-            output = output[:4000] + "\n[... Recortado ...]"
+        # Si la respuesta es muy larga para Telegram, recortarla o enviarla por partes
+        if len(reply_text) > 4000:
+            reply_text = reply_text[:4000] + "\n\n[Respuesta recortada por límite de longitud]"
             
-        bot.reply_to(message, f"💻 **Respuesta desde Termux:**\n```text\n{output}\n```", parse_mode="Markdown")
+        # Editar el mensaje de "Pensando..." con la respuesta final de Gemini
+        bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id,
+            text=reply_text
+        )
         
     except Exception as e:
-        bot.reply_to(message, f"❌ No se pudo conectar con el nodo local de Termux: {e}")
+        bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id,
+            text=f"❌ Ocurrió un error al consultar con Gemini: {e}"
+        )
 
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
@@ -53,5 +66,6 @@ def run_flask():
 if __name__ == '__main__':
     import threading
     threading.Thread(target=run_flask).start()
+    print("Bot con IA iniciado en Render...")
     bot.infinity_polling()
 
