@@ -3,7 +3,7 @@ import telebot
 from flask import Flask
 from google import genai
 
-# Inicializar tokens y cliente
+# Inicializar tokens y cliente de forma explícita
 TELEGRAM_TOKEN = os.environ.get('BOT_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
@@ -25,28 +25,24 @@ def send_welcome(message):
     )
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
 
-# Manejador para cualquier texto que no sea un comando explícito
+# Manejador para cualquier texto utilizando el modelo actual
 @bot.message_handler(func=lambda message: True)
 def handle_ai_chat(message):
     user_text = message.text
     
-    # Mostrar un aviso de que la IA está procesando
     processing_msg = bot.reply_to(message, "🧠 Pensando respuesta...")
     
     try:
-        # Generar respuesta usando el modelo estándar de Gemini
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.8-flash',  # Modelo actualizado
             contents=user_text,
         )
         
         reply_text = response.text
         
-        # Si la respuesta es muy larga para Telegram, recortarla o enviarla por partes
         if len(reply_text) > 4000:
             reply_text = reply_text[:4000] + "\n\n[Respuesta recortada por límite de longitud]"
             
-        # Editar el mensaje de "Pensando..." con la respuesta final de Gemini
         bot.edit_message_text(
             chat_id=message.chat.id,
             message_id=processing_msg.message_id,
