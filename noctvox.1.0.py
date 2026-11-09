@@ -13,23 +13,19 @@ TELEGRAM_TOKEN = os.environ.get('BOT_TOKEN')
 MONGO_URI = os.environ.get('MONGO_URI')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD') or "117566"
 
-# 🔑 Configuración del pool de hasta 6 API Keys (Las 3 del sistema + 3 opcionales)
+# 🔑 Configuración del pool de hasta 6 API Keys del sistema
 API_KEYS_POOL = [
     os.environ.get('GEMINI_API_KEY'),
     os.environ.get('GEMINI_API_KEY_2'),
     os.environ.get('GEMINI_API_KEY_3'),
-    os.environ.get('GEMINI_API_KEY_4'), # Opcional 1
-    os.environ.get('GEMINI_API_KEY_5'), # Opcional 2
-    os.environ.get('GEMINI_API_KEY_6')  # Opcional 3
+    os.environ.get('GEMINI_API_KEY_4'),
+    os.environ.get('GEMINI_API_KEY_5'),
+    os.environ.get('GEMINI_API_KEY_6')
 ]
 
-# Filtrar para dejar solo las que estén configuradas (no nulas/vacías)
 SYSTEM_API_KEYS = [key for key in API_KEYS_POOL if key]
-# La tercera key (o la primera si no hay más) se reserva para Jarvis
-JARVIS_KEY = SYSTEM_API_KEYS[2] if len(SYSTEM_API_KEYS) >= 3 else (SYSTEM_API_KEYS[0] if SYSTEM_API_KEYS else None)
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-client_ai_jarvis = genai.Client(api_key=JARVIS_KEY) if JARVIS_KEY else None
 
 # Configurar el menú de comandos oficial en Telegram
 try:
@@ -88,7 +84,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot Jarvis con ranuras dinámicas, ranuraUser y corrección de errores activo 24/7."
+    return "Bot Jarvis con rotación total en pool de ranuras activo 24/7."
 
 def registrar_usuario(message):
     if users_collection is None:
@@ -152,7 +148,7 @@ def es_usuario_root(username):
     doc = root_collection.find_one({"username": {"$regex": f"^{clean_username}$", "$options": "i"}})
     return doc is not None
 
-# 🔄 ROTACIÓN INTELIGENTE A TRAVÉS DE LAS RANURAS + RANURA USER
+# 🔄 ROTACIÓN INTELIGENTE GENERAL (Para Chat de Usuarios)
 def generar_respuesta_ia(user_id, prompt_final):
     keys_a_probar = []
     
@@ -184,6 +180,29 @@ def generar_respuesta_ia(user_id, prompt_final):
             continue
             
     raise Exception(f"Todas las ranuras de API Keys fallaron. Último error: {ultimo_error}")
+
+# 🦾 ROTACIÓN INTELIGENTE PARA JARVIS (Busca en las 6 ranuras una llave activa)
+def generar_respuesta_jarvis(prompt_jarvis):
+    """Prueba todas las ranuras del sistema en orden hasta que una devuelva con éxito el análisis de Jarvis"""
+    if not SYSTEM_API_KEYS:
+        raise Exception("No hay API Keys del sistema configuradas para Jarvis.")
+
+    ultimo_error = None
+    for idx, api_key in enumerate(SYSTEM_API_KEYS, start=1):
+        try:
+            client_temp = genai.Client(api_key=api_key)
+            response = client_temp.models.generate_content(
+                model='gemini-3.5-flash',
+                contents=prompt_jarvis
+            )
+            if response and hasattr(response, 'text'):
+                return response.text
+        except Exception as e:
+            print(f"⚠️ [Jarvis - Ranura Sistema {idx}] falló: {e}")
+            ultimo_error = e
+            continue
+
+    raise Exception(f"Todas las ranuras de Jarvis fallaron. Último error: {ultimo_error}")
 
 # 🔑 COMANDO /setkey PARA API KEY PERSONAL
 @bot.message_handler(commands=['setkey'])
@@ -226,13 +245,12 @@ def set_personal_key(message):
     
     bot.reply_to(message, "✅ *¡API Key personal guardada con éxito en `ranuraUser`!*", parse_mode="Markdown")
 
-# 🦾 JARVIS: ANÁLISIS MEJORADO Y CORREGIDO DE ERRORES
+# 🦾 JARVIS: ANÁLISIS RESPALDADO POR TODAS LAS RANURAS
 def ejecutar_analisis_jarvis(chat_id_destino=None):
     try:
         if errors_collection is None or remembers_collection is None:
             return "❌ Error: Base de datos no disponible para Jarvis."
 
-        # Traer errores pendientes O los últimos 5 para garantizar que Jarvis siempre vea el historial real
         nuevos_errores = list(errors_collection.find({"jarvis_analizado": False}))
         if not nuevos_errores:
             nuevos_errores = list(errors_collection.find().sort("date", -1).limit(5))
@@ -254,9 +272,6 @@ def ejecutar_analisis_jarvis(chat_id_destino=None):
             datos_auditados += f"- ID: {rem['telegram_id']} | Quest: {rem['quest'][:100]} | Answer: {rem['answer'][:100]}\n"
             remembers_collection.update_one({"_id": rem["_id"]}, {"$set": {"jarvis_analizado": True}})
 
-        if not client_ai_jarvis:
-            return "🦾 *[JARVIS]*: Errores encontrados, pero la API Key de Jarvis no está configurada."
-
         prompt_jarvis = (
             "Actúa como Jarvis, el sofisticado sistema de inteligencia artificial y auditor de infraestructura de Tony Stark. "
             "Analiza los siguientes registros de errores y datos extraídos de la base de datos Atlas:\n\n"
@@ -267,12 +282,8 @@ def ejecutar_analisis_jarvis(chat_id_destino=None):
             "3. Redacta un informe ejecutivo, técnico, profesional y directo al estilo Jarvis para mí, tu creador (@T3nshiAkira)."
         )
 
-        response_jarvis = client_ai_jarvis.models.generate_content(
-            model='gemini-3.5-flash',
-            contents=prompt_jarvis
-        )
-        
-        informe = response_jarvis.text if response_jarvis and hasattr(response_jarvis, 'text') else "Infraestructura estable."
+        # Usar la nueva función que busca en todas las ranuras del sistema una llave activa
+        informe = generar_respuesta_jarvis(prompt_jarvis)
         resultado_final = f"🦾 *[JARVIS - Reporte de Auditoría]*\n\n{informe}"
 
         if chat_id_destino:
@@ -320,7 +331,7 @@ def send_welcome(message):
 
     welcome_text = (
         "🤖 *¡Bienvenido al Sistema Inteligente y Seguro!* \n\n"
-        "Sistema con ranuras dinámicas, tokens personales y auditoría Jarvis.\n\n"
+        "Sistema con rotación total en ranuras y auditoría Jarvis integrada.\n\n"
         "✨ *Comandos útiles:*\n"
         "• `/setkey [tu_key]` - Configurar tu API Key personal\n"
         "• `/jarvis` - Informe de infraestructura (Solo Root)\n"
@@ -575,6 +586,6 @@ if __name__ == '__main__':
     threading.Thread(target=jarvis_supervisor_loop, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
     
-    print("🤖 Bot Jarvis definitivo con corrección de auditoría iniciado en Render...")
+    print("🤖 Bot Jarvis con rotación total de ranuras iniciado en Render...")
     bot.infinity_polling()
 
