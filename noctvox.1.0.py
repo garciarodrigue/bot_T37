@@ -16,7 +16,7 @@ client_ai = genai.Client(api_key=GEMINI_API_KEY)
 
 # Configurar conexión a MongoDB Atlas
 mongo_client = MongoClient(MONGO_URI)
-db = mongo_client.get_database() # Toma la base de datos por defecto de la URI
+db = mongo_client.get_database["telegram_bot"] # Toma la base de datos por defecto de la URI
 users_collection = db.users      # Colección para almacenar los usuarios
 
 app = Flask('')
