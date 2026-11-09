@@ -30,9 +30,9 @@ def handle_ai_chat(message):
     processing_msg = bot.reply_to(message, "🧠 Pensando respuesta...")
     
     try:
-        # Llamada directa al modelo flash actualizado
+        # Usando el modelo de producción altamente estable
         response = client.models.generate_content(
-            model='gemini-3.8-flash',
+            model='gemini-1.5-flash',
             contents=user_text
         )
         
@@ -49,7 +49,7 @@ def handle_ai_chat(message):
         
     except Exception as e:
         error_msg = f"❌ Error detallado de IA: {str(e)}"
-        print(error_msg) # Esto saldrá en los logs de Render
+        print(error_msg)
         bot.edit_message_text(
             chat_id=message.chat.id,
             message_id=processing_msg.message_id,
