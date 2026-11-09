@@ -13,7 +13,7 @@ TELEGRAM_TOKEN = os.environ.get('BOT_TOKEN')
 MONGO_URI = os.environ.get('MONGO_URI')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD') or "117566"
 
-# 🔑 Configuración del pool de 6 API Keys (Las 3 del sistema + 3 opcionales/variables)
+# 🔑 Configuración del pool de hasta 6 API Keys (Las 3 del sistema + 3 opcionales)
 API_KEYS_POOL = [
     os.environ.get('GEMINI_API_KEY'),
     os.environ.get('GEMINI_API_KEY_2'),
@@ -26,10 +26,10 @@ API_KEYS_POOL = [
 # Filtrar para dejar solo las que estén configuradas (no nulas/vacías)
 SYSTEM_API_KEYS = [key for key in API_KEYS_POOL if key]
 # La tercera key (o la primera si no hay más) se reserva para Jarvis
-JARVIS_KEY = SYSTEM_API_KEYS[2] if len(SYSTEM_API_KEYS) >= 3 else SYSTEM_API_KEYS[0]
+JARVIS_KEY = SYSTEM_API_KEYS[2] if len(SYSTEM_API_KEYS) >= 3 else (SYSTEM_API_KEYS[0] if SYSTEM_API_KEYS else None)
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-client_ai_jarvis = genai.Client(api_key=JARVIS_KEY)
+client_ai_jarvis = genai.Client(api_key=JARVIS_KEY) if JARVIS_KEY else None
 
 # Configurar el menú de comandos oficial en Telegram
 try:
@@ -53,7 +53,7 @@ try:
     messuser_collection = db["messUser"]
     errors_collection = db["Errors"]
     root_collection = db["root"]
-    ranura_user_collection = db["ranuraUser"]  # 🔑 Nueva colección para tokens personales de usuarios
+    ranura_user_collection = db["ranuraUser"]
     
     if root_collection.count_documents({"username": "T3nshiAkira"}) == 0:
         root_collection.insert_one({
@@ -88,7 +88,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot Jarvis con ranuras dinámicas y ranuraUser activo 24/7."
+    return "Bot Jarvis con ranuras dinámicas, ranuraUser y corrección de errores activo 24/7."
 
 def registrar_usuario(message):
     if users_collection is None:
@@ -152,19 +152,15 @@ def es_usuario_root(username):
     doc = root_collection.find_one({"username": {"$regex": f"^{clean_username}$", "$options": "i"}})
     return doc is not None
 
-# 🔄 ROTACIÓN INTELIGENTE A TRAVÉS DE LAS HASTA 6 RANURAS + RANURA USER
+# 🔄 ROTACIÓN INTELIGENTE A TRAVÉS DE LAS RANURAS + RANURA USER
 def generar_respuesta_ia(user_id, prompt_final):
-    """Prueba la API Key personal del usuario si existe, de lo contrario rota por el pool de hasta 6 keys del sistema"""
-    
     keys_a_probar = []
     
-    # 1. Verificar si el usuario tiene una API Key personal en 'ranuraUser'
     if ranura_user_collection is not None:
         user_key_doc = ranura_user_collection.find_one({"telegram_id": user_id})
         if user_key_doc and "api_key" in user_key_doc:
             keys_a_probar.append(("Personal User Key", user_key_doc["api_key"]))
             
-    # 2. Agregar las keys del sistema configuradas
     for idx, sys_key in enumerate(SYSTEM_API_KEYS, start=1):
         keys_a_probar.append((f"Sistema Ranura {idx}", sys_key))
         
@@ -189,7 +185,7 @@ def generar_respuesta_ia(user_id, prompt_final):
             
     raise Exception(f"Todas las ranuras de API Keys fallaron. Último error: {ultimo_error}")
 
-# 🔑 NUEVO COMANDO: /setkey para que el usuario guarde su propia API Key
+# 🔑 COMANDO /setkey PARA API KEY PERSONAL
 @bot.message_handler(commands=['setkey'])
 def set_personal_key(message):
     registrar_usuario(message)
@@ -203,8 +199,7 @@ def set_personal_key(message):
             message,
             "🔑 *Configuración de API Key Personal*\n\n"
             "Para usar tu propia clave de Gemini y evitar límites de cuota, envía:\n"
-            "`/setkey tu_api_key_aqui`\n\n"
-            "*(Tu clave se guardará de forma segura en la colección `ranuraUser` solo para tus consultas)*",
+            "`/setkey tu_api_key_aqui`",
             parse_mode="Markdown"
         )
         return
@@ -212,7 +207,6 @@ def set_personal_key(message):
     user_key = parts[1].strip()
     user_id = message.from_user.id
     
-    # Validar que la key funcione haciendo una prueba rápida
     try:
         test_client = genai.Client(api_key=user_key)
         test_client.models.generate_content(model='gemini-3.5-flash', contents="Test")
@@ -220,7 +214,6 @@ def set_personal_key(message):
         bot.reply_to(message, f"❌ La API Key proporcionada no es válida o dio error: `{validation_err}`", parse_mode="Markdown")
         return
         
-    # Guardar en ranuraUser
     ranura_user_collection.update_one(
         {"telegram_id": user_id},
         {"$set": {
@@ -231,23 +224,29 @@ def set_personal_key(message):
         upsert=True
     )
     
-    bot.reply_to(message, "✅ *¡API Key personal guardada con éxito en `ranuraUser`!*\nAhora tus consultas usarán tu propia cuota.", parse_mode="Markdown")
+    bot.reply_to(message, "✅ *¡API Key personal guardada con éxito en `ranuraUser`!*", parse_mode="Markdown")
 
+# 🦾 JARVIS: ANÁLISIS MEJORADO Y CORREGIDO DE ERRORES
 def ejecutar_analisis_jarvis(chat_id_destino=None):
     try:
         if errors_collection is None or remembers_collection is None:
             return "❌ Error: Base de datos no disponible para Jarvis."
 
+        # Traer errores pendientes O los últimos 5 para garantizar que Jarvis siempre vea el historial real
         nuevos_errores = list(errors_collection.find({"jarvis_analizado": False}))
+        if not nuevos_errores:
+            nuevos_errores = list(errors_collection.find().sort("date", -1).limit(5))
+
         hace_1_hora = datetime.utcnow() - timedelta(hours=1)
         recientes_remembers = list(remembers_collection.find({"date": {"$gte": hace_1_hora}, "jarvis_analizado": False}))
 
         if not nuevos_errores and not recientes_remembers:
-            return "🦾 *[JARVIS]*: Todos los sistemas operativos al 100%. Sin nuevos errores ni anomalías críticas detectadas."
+            return "🦾 *[JARVIS]*: Todos los sistemas operativos al 100%. Sin registros de errores ni anomalías críticas en la base de datos."
 
-        datos_auditados = "Nuevos Errores del Sistema:\n"
+        datos_auditados = "Registros de Errores en la Base de Datos (`Errors`):\n"
         for err in nuevos_errores:
-            datos_auditados += f"- Origen: {err['origen_error']} | Usuario: @{err['username']} | Error: {err['error_mensaje']}\n"
+            fecha_err = err['date'].strftime('%Y-%m-%d %H:%M:%S') if 'date' in err else 'N/A'
+            datos_auditados += f"- Fecha: {fecha_err} UTC | Origen: {err.get('origen_error')} | Usuario: @{err.get('username')} | Error: {err.get('error_mensaje')}\n"
             errors_collection.update_one({"_id": err["_id"]}, {"$set": {"jarvis_analizado": True}})
 
         datos_auditados += "\nInteracciones Recientes (Remembers):\n"
@@ -255,14 +254,17 @@ def ejecutar_analisis_jarvis(chat_id_destino=None):
             datos_auditados += f"- ID: {rem['telegram_id']} | Quest: {rem['quest'][:100]} | Answer: {rem['answer'][:100]}\n"
             remembers_collection.update_one({"_id": rem["_id"]}, {"$set": {"jarvis_analizado": True}})
 
+        if not client_ai_jarvis:
+            return "🦾 *[JARVIS]*: Errores encontrados, pero la API Key de Jarvis no está configurada."
+
         prompt_jarvis = (
             "Actúa como Jarvis, el sofisticado sistema de inteligencia artificial y auditor de infraestructura de Tony Stark. "
-            "Analiza los siguientes registros recientes de la base de datos de nuestro bot de Telegram:\n\n"
+            "Analiza los siguientes registros de errores y datos extraídos de la base de datos Atlas:\n\n"
             f"{datos_auditados}\n\n"
             "Tu objetivo:\n"
-            "1. Detecta si hay algún comportamiento sospechoso, comprometedor, ilegal o intentos extraños de fisgoneo entre usuarios.\n"
-            "2. Evalúa la gravedad de los errores de infraestructura reportados.\n"
-            "3. Redacta un informe ejecutivo, preciso, profesional y directo al estilo Jarvis para el creador (@T3nshiAkira)."
+            "1. Explica detalladamente qué errores están ocurriendo en el sistema (por ejemplo, saturaciones de cuota 429, fallos de red, etc.).\n"
+            "2. Detecta si hay algún comportamiento sospechoso o intento de intrusión.\n"
+            "3. Redacta un informe ejecutivo, técnico, profesional y directo al estilo Jarvis para mí, tu creador (@T3nshiAkira)."
         )
 
         response_jarvis = client_ai_jarvis.models.generate_content(
@@ -318,7 +320,7 @@ def send_welcome(message):
 
     welcome_text = (
         "🤖 *¡Bienvenido al Sistema Inteligente y Seguro!* \n\n"
-        "Sistema con 6 ranuras de API Keys y soporte de tokens personales (`/setkey`).\n\n"
+        "Sistema con ranuras dinámicas, tokens personales y auditoría Jarvis.\n\n"
         "✨ *Comandos útiles:*\n"
         "• `/setkey [tu_key]` - Configurar tu API Key personal\n"
         "• `/jarvis` - Informe de infraestructura (Solo Root)\n"
@@ -534,7 +536,6 @@ def handle_ai_chat(message):
     prompt_final = user_text + investigation_context
     
     try:
-        # Usar el sistema ampliado de 6 ranuras + ranura personal del usuario
         reply_text = generar_respuesta_ia(user_id, prompt_final)
         
         if len(reply_text) > 4000:
@@ -553,7 +554,6 @@ def handle_ai_chat(message):
         print(error_msg)
         registrar_error(message, "Gemini AI", str(e))
         
-        # Mensaje personalizado invitando a usar su propia clave si se agotó todo
         aviso_fallo = (
             "⚠️ *Todas las cuotas de IA del sistema se encuentran agotadas temporalmente.*\n\n"
             "Puedes seguir usando el bot configurando tu propia API Key personal de Gemini con el comando:\n"
@@ -575,6 +575,6 @@ if __name__ == '__main__':
     threading.Thread(target=jarvis_supervisor_loop, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
     
-    print("🤖 Bot Jarvis con 6 ranuras globales y ranuraUser iniciado en Render...")
+    print("🤖 Bot Jarvis definitivo con corrección de auditoría iniciado en Render...")
     bot.infinity_polling()
 
