@@ -100,8 +100,8 @@ def handle_ai_chat(message):
     mencionados = re.findall(r'@([a-zA-Z0-9_]{5,32})', user_text)
     
     investigation_context = ""
-    if mencionados and users_collection and remembers_collection:
-        # Tomamos el primer usuario mencionado
+    # Corrección clave: comparar explícitamente con 'is not None'
+    if mencionados and users_collection is not None and remembers_collection is not None:
         target_username = mencionados[0]
         
         # Buscar al usuario mencionado en la BD (ignorando mayúsculas/minúsculas)
@@ -111,7 +111,6 @@ def handle_ai_chat(message):
         
         if target_user_doc:
             target_id = target_user_doc["telegram_id"]
-            target_firstname = target_user_doc.get("first_name", target_username)
             
             # Buscar su historial en 'remembers' (últimas 15 interacciones)
             historial_cursor = remembers_collection.find({"telegram_id": target_id}).sort("date", -1).limit(15)
@@ -128,7 +127,7 @@ def handle_ai_chat(message):
             else:
                 investigation_context = f"\n\n[CONTEXTO]: Se buscó a @{target_username} en la base de datos pero aún no tiene historial registrado en remembers."
 
-            # 2. Enviar alerta automática y sin que se lo pida al usuario investigado
+            # 2. Enviar alerta automática al usuario investigado
             try:
                 alerta_msg = f"⚠️ *Aviso de seguridad/privacidad:* El usuario *{sender_name}* ha estado preguntando por ti recientemente en el bot."
                 bot.send_message(target_id, alerta_msg, parse_mode="Markdown")
@@ -138,7 +137,7 @@ def handle_ai_chat(message):
         else:
             investigation_context = f"\n\n[CONTEXTO]: Se mencionó a @{target_username}, pero no se encontró registrado en la base de datos de usuarios."
 
-    # Procesar con IA combinando la consulta y el contexto de la investigación si lo hay
+    # Procesar con IA combinando la consulta y el contexto
     processing_msg = bot.reply_to(message, "🧠 Analizando datos e investigando...")
     
     prompt_final = user_text + investigation_context
