@@ -3,7 +3,6 @@ import telebot
 from flask import Flask
 from google import genai
 
-# Inicializar tokens y cliente de forma explícita
 TELEGRAM_TOKEN = os.environ.get('BOT_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
@@ -21,27 +20,26 @@ def send_welcome(message):
     welcome_text = (
         "🤖 *¡Hola! Soy tu bot con Inteligencia Artificial (Gemini).* 🚀\n\n"
         "Estoy ejecutándome 24/7 en la nube de Render.\n"
-        "Puedes escribirme directamente cualquier pregunta, duda o tarea y te responderé usando IA."
+        "Escríbeme cualquier pregunta o tarea y te responderé con IA."
     )
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
 
-# Manejador para cualquier texto utilizando el modelo actual
 @bot.message_handler(func=lambda message: True)
 def handle_ai_chat(message):
     user_text = message.text
-    
     processing_msg = bot.reply_to(message, "🧠 Pensando respuesta...")
     
     try:
+        # Llamada directa al modelo flash actualizado
         response = client.models.generate_content(
-            model='gemini-3.8-flash',  # Modelo actualizado
-            contents=user_text,
+            model='gemini-3.8-flash',
+            contents=user_text
         )
         
-        reply_text = response.text
+        reply_text = response.text if response and hasattr(response, 'text') else "No se obtuvo respuesta del modelo."
         
         if len(reply_text) > 4000:
-            reply_text = reply_text[:4000] + "\n\n[Respuesta recortada por límite de longitud]"
+            reply_text = reply_text[:4000] + "\n\n[Respuesta recortada por límite]"
             
         bot.edit_message_text(
             chat_id=message.chat.id,
@@ -50,10 +48,12 @@ def handle_ai_chat(message):
         )
         
     except Exception as e:
+        error_msg = f"❌ Error detallado de IA: {str(e)}"
+        print(error_msg) # Esto saldrá en los logs de Render
         bot.edit_message_text(
             chat_id=message.chat.id,
             message_id=processing_msg.message_id,
-            text=f"❌ Ocurrió un error al consultar con Gemini: {e}"
+            text=error_msg
         )
 
 def run_flask():
