@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import telebot
 from flask import Flask
 from google import genai
@@ -16,6 +17,16 @@ MONGO_URI = os.environ.get('MONGO_URI')
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client_ai = genai.Client(api_key=GEMINI_API_KEY)
 
+# Configurar el menú de comandos oficial en Telegram
+try:
+    bot.set_my_commands([
+        telebot.types.BotCommand("start", "🌟 Iniciar el bot y ver opciones"),
+        telebot.types.BotCommand("mensaje", "🔒 Enviar mensaje seguro cifrado (@usuario)"),
+        telebot.types.BotCommand("admin", "🛡️ Panel de administración (Requiere clave)")
+    ])
+except Exception as e:
+    print(f"⚠️ No se pudieron configurar los comandos en Telegram: {e}")
+
 # Configuración de MongoDB Atlas y colecciones
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
@@ -24,7 +35,7 @@ try:
     users_collection = db["usuarios"]
     remembers_collection = db["remembers"]
     messuser_collection = db["messUser"]
-    errors_collection = db["Errors"]  # 🛡️ Nueva colección para registro de errores y auditoría
+    errors_collection = db["Errors"]
     print("✅ ¡Conexión exitosa con MongoDB Atlas!")
 except Exception as e:
     print(f"❌ Error crítico conectando a MongoDB Atlas: {e}")
@@ -33,12 +44,15 @@ except Exception as e:
     messuser_collection = None
     errors_collection = None
 
+# Diccionario para controlar el límite de mensajes por usuario (Cooldown de 5 segundos)
+user_cooldowns = {}
+
 # Servidor Flask para mantener el servicio web activo en Render
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot administrador con IA y MongoDB en Render activo 24/7."
+    return "Bot avanzado con IA, seguridad y MongoDB en Render activo 24/7."
 
 def registrar_usuario(message):
     """Guarda o actualiza la información general del usuario"""
@@ -72,12 +86,12 @@ def registrar_error(message, origen, error_detalle):
             "telegram_id": user.id if user else "Sistema/Desconocido",
             "username": user.username if user and user.username else "Sin alias",
             "prompt_o_comando": message.text if message and hasattr(message, 'text') else "N/A",
-            "origen_error": origen,  # Ej: 'Gemini AI', 'Render/Telegram', 'Base de Datos'
+            "origen_error": origen,
             "error_mensaje": str(error_detalle),
             "date": datetime.utcnow()
         }
         errors_collection.insert_one(error_doc)
-        print(f"⚠️ Error registrado en la colección Errors [{origen}]")
+        print(f"⚠️ Error registrado en Errors [{origen}]")
     except Exception as ex:
         print(f"❌ Falló al registrar en Errors: {ex}")
 
@@ -99,48 +113,77 @@ def guardar_remember(user_id, quest, answer):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     registrar_usuario(message)
-    welcome_text = (
-        "🤖 *¡Hola! Soy tu bot con panel de administración y seguridad.*\n\n"
-        "• Escríbeme cualquier pregunta para hablar con la IA.\n"
-        "• `/mensaje [texto] @usuario` para mensajería cifrada.\n"
-        "• `/admin [vínculo]` para que el administrador revise conversaciones."
-    )
-    bot.reply_to(message, welcome_text, parse_mode="Markdown")
+    
+    # Teclado estético con botones interactivos (Inline Keyboard)
+    markup = telebot.types.InlineKeyboardMarkup()
+    btn_help = telebot.types.InlineKeyboardButton("💡 ¿Cómo usar?", callback_data="help_info")
+    btn_secure = telebot.types.InlineKeyboardButton("🔒 Mensaje Cifrado", callback_data="secure_info")
+    markup.add(btn_help, btn_secure)
 
-# 🔍 NUEVO: Panel de Admin para consultar vínculos y conversaciones en messUser
+    welcome_text = (
+        "🤖 *¡Bienvenido al Sistema Inteligente y Seguro!* \n\n"
+        "Estoy operando 24/7 con Inteligencia Artificial y base de datos en la nube.\n\n"
+        "✨ *¿Qué puedes hacer?*\n"
+        "• Hablar conmigo de cualquier tema.\n"
+        "• Usar `/mensaje [texto] @usuario` para mensajería protegida.\n"
+        "• Investigar menciones y proteger tu privacidad."
+    )
+    bot.reply_to(message, welcome_text, parse_mode="Markdown", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_inline(call):
+    """Maneja los clics de los botones interactivos estéticos"""
+    if call.data == "help_info":
+        bot.answer_callback_query(call.id, "¡Simplemente escríbeme cualquier pregunta en el chat!")
+        bot.send_message(call.message.chat.id, "💡 *Ayuda rápida:* Escribe directamente tu pregunta o dilema y te responderé usando Gemini IA.", parse_mode="Markdown")
+    elif call.data == "secure_info":
+        bot.answer_callback_query(call.id, "Modo Mensajero Seguro activado")
+        bot.send_message(call.message.chat.id, "🔒 *Mensajería Segura:* Usa el comando `/mensaje Hola @amigo` para crear un vínculo cifrado privado.", parse_mode="Markdown")
+
+# 🛡️ Panel de Admin protegido con la contraseña 117566
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     registrar_usuario(message)
     
-    # Opcional: Puedes restringir esto poniendo tu propio telegram_id de admin aquí abajo
-    # ADMIN_ID = 123456789
-    # if message.from_user.id != ADMIN_ID:
-    #     bot.reply_to(message, "⛔ No tienes permisos de administrador.")
-    #     return
-
     args = message.text.replace('/admin', '').strip()
+    parts = args.split(' ', 1)
+    password = parts[0] if len(parts) > 0 else ""
     
-    if not args:
-        # Si no pone argumentos, mostrar resumen rápido de la BD
+    # Validación estricta de la contraseña de administrador
+    if password != "117566":
+        bot.reply_to(
+            message, 
+            "⛔ *Acceso Denegado*\n\n"
+            "La contraseña de administrador es incorrecta o no fue proporcionada.\n"
+            "🔐 *Uso correcto:* `/admin 117566` o `/admin 117566 [vínculo]`", 
+            parse_mode="Markdown"
+        )
+        registrar_error(message, "Seguridad Admin", "Intento de acceso al panel con contraseña incorrecta.")
+        return
+
+    sub_args = parts[1] if len(parts) > 1 else ""
+    
+    if not sub_args:
+        # Mostrar resumen general del sistema
         try:
             total_users = users_collection.count_documents({}) if users_collection is not None else 0
             total_msgs = messuser_collection.count_documents({}) if messuser_collection is not None else 0
             total_errors = errors_collection.count_documents({}) if errors_collection is not None else 0
             
             resumen = (
-                "🛠️ *Panel de Administración - Resumen*\n\n"
-                f"👥 Usuarios registrados: `{total_users}`\n"
+                "🛡️ *Panel de Administración Autorizado*\n\n"
+                f"👥 Usuarios en BD: `{total_users}`\n"
                 f"🔒 Mensajes seguros (`messUser`): `{total_msgs}`\n"
                 f"⚠️ Errores registrados (`Errors`): `{total_errors}`\n\n"
-                "💡 *Uso:* Escribe `/admin [vínculo]` (ej: `/admin MarEdu`) para inspeccionar un chat seguro específico."
+                "💡 *Inspección:* Escribe `/admin 117566 [vínculo]` (ej: `/admin 117566 MarEdu`) para ver una conversación privada."
             )
             bot.reply_to(message, resumen, parse_mode="Markdown")
         except Exception as e:
             bot.reply_to(message, f"❌ Error al consultar estadísticas: {e}")
         return
 
-    # Si proporcionó un vínculo, buscar en messUser
-    vinculo_buscado = args
+    # Buscar el vínculo seguro en messUser
+    vinculo_buscado = sub_args
     if messuser_collection is None:
         bot.reply_to(message, "❌ Base de datos no conectada.")
         return
@@ -220,7 +263,7 @@ def handle_secure_message(message):
         bot.reply_to(message, "❌ Hubo un error al guardar el mensaje seguro.")
         return
         
-    bot.reply_to(message, f"✅ *Mensaje enviado y protegido.*\n🔗 *Vínculo:* `{vinculo_code}`", parse_mode="Markdown")
+    bot.reply_to(message, f"✅ *Mensaje seguro enviado con éxito.*\n🔗 *Vínculo generado:* `{vinculo_code}`", parse_mode="Markdown")
     
     try:
         alerta_destinatario = (
@@ -235,8 +278,20 @@ def handle_secure_message(message):
 
 @bot.message_handler(func=lambda message: True)
 def handle_ai_chat(message):
-    registrar_usuario(message)
     user_id = message.from_user.id
+    current_time = time.time()
+    
+    # ⏱️ SISTEMA DE LÍMITE DE MENSAJES (COOLDOWN DE 5 SEGUNDOS)
+    if user_id in user_cooldowns:
+        elapsed_time = current_time - user_cooldowns[user_id]
+        if elapsed_time < 5:
+            tiempo_restante = round(5 - elapsed_time, 1)
+            bot.reply_to(message, f"⏳ Por favor, espera {tiempo_restante} segundos antes de enviar otro mensaje.")
+            return
+            
+    user_cooldowns[user_id] = current_time
+
+    registrar_usuario(message)
     user_text = message.text
     sender_name = message.from_user.first_name or f"@{message.from_user.username}" or "Alguien"
     
@@ -269,7 +324,13 @@ def handle_ai_chat(message):
             except Exception as alert_err:
                 registrar_error(message, "Render/Telegram", f"No se pudo enviar alerta de privacidad: {str(alert_err)}")
 
-    processing_msg = bot.reply_to(message, "🧠 Procesando...")
+    # 💫 Mostrar estado 'Escribiendo...' de manera nativa en Telegram
+    try:
+        bot.send_chat_action(message.chat.id, 'typing')
+    except Exception:
+        pass
+
+    processing_msg = bot.reply_to(message, "🧠 Analizando y procesando respuesta...")
     prompt_final = user_text + investigation_context
     
     try:
@@ -289,11 +350,11 @@ def handle_ai_chat(message):
             text=reply_text
         )
         
-        # 💡 Guardar en remembers SOLAMENTE si es chat con IA (excluyendo comandos puros)
+        # Guardar en remembers solo las interacciones de chat con IA
         guardar_remember(user_id, user_text, reply_text)
         
     except Exception as e:
-        error_msg = f"❌ Error de IA: {str(e)}"
+        error_msg = f"❌ Error en el motor de IA: {str(e)}"
         print(error_msg)
         # Registrar el error detallado en la colección Errors de MongoDB
         registrar_error(message, "Gemini AI", str(e))
@@ -309,6 +370,6 @@ def run_flask():
 
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
-    print("Bot administrador con MongoDB Atlas e IA iniciado en Render...")
+    print("Bot avanzado con diseño estético, cooldown y panel seguro iniciado en Render...")
     bot.infinity_polling()
 
