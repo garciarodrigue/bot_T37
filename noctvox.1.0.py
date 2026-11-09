@@ -1,4 +1,5 @@
 import os
+import re
 import telebot
 from flask import Flask
 from google import genai
@@ -21,7 +22,7 @@ try:
     mongo_client.admin.command('ping')
     db = mongo_client["telegram_bot_db"]
     users_collection = db["usuarios"]
-    remembers_collection = db["remembers"]  # Nueva colección para las conversaciones
+    remembers_collection = db["remembers"]
     print("✅ ¡Conexión exitosa con MongoDB Atlas!")
 except Exception as e:
     print(f"❌ Error crítico conectando a MongoDB Atlas: {e}")
@@ -61,7 +62,7 @@ def registrar_usuario(message):
         print(f"❌ Error al guardar usuario en MongoDB: {e}")
 
 def guardar_remember(user_id, quest, answer):
-    """Guarda cada pregunta, respuesta y el ID del usuario en la colección remembers"""
+    """Guarda cada pregunta, respuesta y el ID del usuario en remembers"""
     if remembers_collection is None:
         return
     try:
@@ -69,10 +70,9 @@ def guardar_remember(user_id, quest, answer):
             "telegram_id": user_id,
             "quest": quest,
             "answer": answer,
-            "date": datetime.utcnow()  # Se guarda con fecha y hora UTC
+            "date": datetime.utcnow()
         }
         remembers_collection.insert_one(remember_data)
-        print(f"📝 Remember guardado para el usuario {user_id}")
     except Exception as e:
         print(f"❌ Error al guardar en remembers: {e}")
 
@@ -81,27 +81,72 @@ def send_welcome(message):
     registrar_usuario(message)
     welcome_text = (
         "🤖 *¡Hola! Soy tu bot con IA (Gemini) y base de datos en la nube.*\n\n"
-        "Estoy ejecutándome 24/7 en Render y guardando tus historiales.\n"
-        "Escríbeme cualquier pregunta o tarea y te responderé con IA."
+        "Estoy ejecutándome 24/7 en Render y analizando interacciones.\n"
+        "Escríbeme cualquier pregunta o menciona a alguien con @usuario."
     )
-    # Opcional: También podemos registrar el comando start en remembers si lo deseas
     guardar_remember(message.from_user.id, message.text, welcome_text)
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
 def handle_ai_chat(message):
-    # Registrar/actualizar perfil del usuario
+    # Registrar/actualizar perfil del usuario actual
     registrar_usuario(message)
     
     user_id = message.from_user.id
     user_text = message.text
-    processing_msg = bot.reply_to(message, "🧠 Pensando respuesta...")
+    sender_name = message.from_user.first_name or f"@{message.from_user.username}" or "Alguien"
+    
+    # 1. Detectar si el usuario mencionó algún @username en el texto
+    mencionados = re.findall(r'@([a-zA-Z0-9_]{5,32})', user_text)
+    
+    investigation_context = ""
+    if mencionados and users_collection and remembers_collection:
+        # Tomamos el primer usuario mencionado
+        target_username = mencionados[0]
+        
+        # Buscar al usuario mencionado en la BD (ignorando mayúsculas/minúsculas)
+        target_user_doc = users_collection.find_one({
+            "username": {"$regex": f"^{target_username}$", "$options": "i"}
+        })
+        
+        if target_user_doc:
+            target_id = target_user_doc["telegram_id"]
+            target_firstname = target_user_doc.get("first_name", target_username)
+            
+            # Buscar su historial en 'remembers' (últimas 15 interacciones)
+            historial_cursor = remembers_collection.find({"telegram_id": target_id}).sort("date", -1).limit(15)
+            historial_list = list(historial_cursor)
+            
+            if historial_list:
+                historia_texto = "\n".join([f"- Preguntó: '{h['quest']}' | Bot respondió: '{h['answer']}'" for h in historial_list])
+                investigation_context = (
+                    f"\n\n[CONTEXTO DE INVESTIGACIÓN SOBRE EL USUARIO @{target_username}]:\n"
+                    f"El usuario actual está preguntando por @{target_username}. "
+                    f"Aquí tienes el historial reciente de preguntas y respuestas de @{target_username} para que hagas un breve análisis/investigación de sus temas recurrentes:\n"
+                    f"{historia_texto}"
+                )
+            else:
+                investigation_context = f"\n\n[CONTEXTO]: Se buscó a @{target_username} en la base de datos pero aún no tiene historial registrado en remembers."
+
+            # 2. Enviar alerta automática y sin que se lo pida al usuario investigado
+            try:
+                alerta_msg = f"⚠️ *Aviso de seguridad/privacidad:* El usuario *{sender_name}* ha estado preguntando por ti recientemente en el bot."
+                bot.send_message(target_id, alerta_msg, parse_mode="Markdown")
+                print(f"🚨 Alerta enviada al usuario {target_id} sobre la consulta de {sender_name}.")
+            except Exception as alert_err:
+                print(f"⚠️ No se pudo enviar la alerta al usuario {target_id}: {alert_err}")
+        else:
+            investigation_context = f"\n\n[CONTEXTO]: Se mencionó a @{target_username}, pero no se encontró registrado en la base de datos de usuarios."
+
+    # Procesar con IA combinando la consulta y el contexto de la investigación si lo hay
+    processing_msg = bot.reply_to(message, "🧠 Analizando datos e investigando...")
+    
+    prompt_final = user_text + investigation_context
     
     try:
-        # Generar respuesta con la IA
         response = client_ai.models.generate_content(
             model='gemini-3.5-flash',
-            contents=user_text
+            contents=prompt_final
         )
         
         reply_text = response.text if response and hasattr(response, 'text') else "No se obtuvo respuesta del modelo."
@@ -115,7 +160,7 @@ def handle_ai_chat(message):
             text=reply_text
         )
         
-        # 💡 Guardar la pregunta y la respuesta en la colección 'remembers'
+        # Guardar la interacción en remembers
         guardar_remember(user_id, user_text, reply_text)
         
     except Exception as e:
