@@ -11,8 +11,9 @@ import threading
 # Cargar credenciales desde las variables de entorno de Render
 TELEGRAM_TOKEN = os.environ.get('BOT_TOKEN')
 MONGO_URI = os.environ.get('MONGO_URI')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD') or "117566" # Respaldo por defecto si no se configura
 
-# 🔑 Configuración de las 3 API Keys de Gemini (Cuentas separadas)
+# 🔑 Configuración de las 3 API Keys de Gemini
 API_KEY_1 = os.environ.get('GEMINI_API_KEY')
 API_KEY_2 = os.environ.get('GEMINI_API_KEY_2') or API_KEY_1
 API_KEY_3 = os.environ.get('GEMINI_API_KEY_3') or API_KEY_1
@@ -27,6 +28,7 @@ client_ai_jarvis = genai.Client(api_key=API_KEY_3)
 try:
     bot.set_my_commands([
         telebot.types.BotCommand("start", "🌟 Iniciar el bot y ver opciones"),
+        telebot.types.BotCommand("jarvis", "🦾 Forzar reporte de auditoría de Jarvis"),
         telebot.types.BotCommand("mensaje", "🔒 Enviar mensaje seguro cifrado (@usuario)"),
         telebot.types.BotCommand("admin", "🛡️ Panel de administración (Requiere clave)")
     ])
@@ -50,8 +52,18 @@ except Exception as e:
     messuser_collection = None
     errors_collection = None
 
-# Diccionario para controlar el cooldown de usuarios (5 segundos)
+# Diccionario inteligente para el Cooldown (con control de fugas de memoria RAM)
 user_cooldowns = {}
+
+def limpiar_cooldowns_antiguos():
+    """Limpia periódicamente la memoria RAM de usuarios inactivos para evitar fugas"""
+    while True:
+        time.sleep(600) # Cada 10 minutos
+        ahora = time.time()
+        # Elimina registros mayores a 10 minutos sin actividad
+        inactivos = [uid for uid, timestamp in user_cooldowns.items() if ahora - timestamp > 600]
+        for uid in inactivos:
+            del user_cooldowns[uid]
 
 # Servidor Flask para mantener el servicio web activo en Render
 app = Flask('')
@@ -95,7 +107,7 @@ def registrar_error(message, origen, error_detalle):
             "origen_error": origen,
             "error_mensaje": str(error_detalle),
             "date": datetime.utcnow(),
-            "jarvis_analizado": False  # Para que Jarvis sepa que es nuevo
+            "jarvis_analizado": False
         }
         errors_collection.insert_one(error_doc)
         print(f"⚠️ Error registrado en Errors [{origen}]")
@@ -118,9 +130,8 @@ def guardar_remember(user_id, quest, answer):
     except Exception as e:
         print(f"❌ Error al guardar en remembers: {e}")
 
-# 🤖 SISTEMA DE ROTACIÓN INTELIGENTE DE API KEYS PARA CHAT
 def generar_respuesta_ia(prompt_final):
-    """Intenta con la Key principal, si falla, rota automáticamente a la Key de respaldo"""
+    """Rotación inteligente considerando excepciones de red/límite vs seguridad"""
     try:
         response = client_ai_primary.models.generate_content(
             model='gemini-3.5-flash',
@@ -128,6 +139,7 @@ def generar_respuesta_ia(prompt_final):
         )
         return response.text if response and hasattr(response, 'text') else "No se obtuvo respuesta."
     except Exception as e_primary:
+        # Si el error es por bloqueo de seguridad, la key 2 dará el mismo error, pero intentamos igual por robustez
         print(f"⚠️ API Key Principal falló. Rotando a Key de respaldo... Error: {e_primary}")
         try:
             response = client_ai_backup.models.generate_content(
@@ -138,62 +150,80 @@ def generar_respuesta_ia(prompt_final):
         except Exception as e_backup:
             raise Exception(f"Ambas API Keys fallaron. Principal: {e_primary} | Respaldo: {e_backup}")
 
-# 🦾 JARVIS: HILO DE MONITOREO Y AUDITORÍA EN SEGUNDO PLANO
+# 🦾 FUNCIÓN CENTRAL DE JARVIS (Para usarla tanto automática como por comando)
+def ejecutar_analisis_jarvis(chat_id_destino=None):
+    """Revisa errores y remembers pendientes y genera el reporte de Jarvis"""
+    try:
+        if errors_collection is None or remembers_collection is None:
+            return "❌ Error: Base de datos no disponible para Jarvis."
+
+        nuevos_errores = list(errors_collection.find({"jarvis_analizado": False}))
+        hace_1_hora = datetime.utcnow() - timedelta(hours=1)
+        recientes_remembers = list(remembers_collection.find({"date": {"$gte": hace_1_hora}, "jarvis_analizado": False}))
+
+        if not nuevos_errores and not recientes_remembers:
+            return "🦾 *[JARVIS]*: Todos los sistemas operativos al 100%. Sin nuevos errores ni anomalías críticas detectadas."
+
+        datos_auditados = "Nuevos Errores del Sistema:\n"
+        for err in nuevos_errores:
+            datos_auditados += f"- Origen: {err['origen_error']} | Usuario: @{err['username']} | Error: {err['error_mensaje']}\n"
+            errors_collection.update_one({"_id": err["_id"]}, {"$set": {"jarvis_analizado": True}})
+
+        datos_auditados += "\nInteracciones Recientes (Remembers):\n"
+        for rem in recientes_remembers:
+            datos_auditados += f"- ID: {rem['telegram_id']} | Quest: {rem['quest'][:100]} | Answer: {rem['answer'][:100]}\n"
+            remembers_collection.update_one({"_id": rem["_id"]}, {"$set": {"jarvis_analizado": True}})
+
+        prompt_jarvis = (
+            "Actúa como Jarvis, el sofisticado sistema de inteligencia artificial y auditor de infraestructura de Tony Stark. "
+            "Analiza los siguientes registros recientes de la base de datos de nuestro bot de Telegram:\n\n"
+            f"{datos_auditados}\n\n"
+            "Tu objetivo:\n"
+            "1. Detecta si hay algún comportamiento sospechoso, comprometedor, ilegal o intentos extraños de fisgoneo entre usuarios.\n"
+            "2. Evalúa la gravedad de los errores de infraestructura reportados.\n"
+            "3. Redacta un informe ejecutivo, preciso, profesional y directo al estilo Jarvis. "
+            "Si todo está operando con normalidad y sin amenazas, sé muy breve confirmando que la infraestructura está estable."
+        )
+
+        response_jarvis = client_ai_jarvis.models.generate_content(
+            model='gemini-3.5-flash',
+            contents=prompt_jarvis
+        )
+        
+        informe = response_jarvis.text if response_jarvis and hasattr(response_jarvis, 'text') else "Infraestructura estable."
+        resultado_final = f"🦾 *[JARVIS - Reporte de Auditoría]*\n\n{informe}"
+
+        if chat_id_destino:
+            bot.send_message(chat_id_destino, resultado_final, parse_mode="Markdown")
+        
+        return resultado_final
+    except Exception as jarvis_err:
+        print(f"❌ Error ejecutando a Jarvis: {jarvis_err}")
+        return f"❌ Error ejecutando a Jarvis: {jarvis_err}"
+
 def jarvis_supervisor_loop():
-    """Ejecuta un ciclo cada 5 minutos analizando la BD con la 3era API Key y reportando a @T3nshiAkira"""
+    """Ciclo en segundo plano cada 5 minutos"""
     print("🦾 Jarvis Supervisor iniciado en segundo plano...")
     while True:
-        time.sleep(300) # Espera 5 minutos entre revisiones
+        time.sleep(300)
         try:
-            if errors_collection is None or remembers_collection is None:
-                continue
+            # Ejecuta y envía reporte automático a @T3nshiAkira
+            ejecutar_analisis_jarvis("@T3nshiAkira")
+            print("🦾 Jarvis envió su reporte automático con éxito.")
+        except Exception as e:
+            print(f"❌ Error en bucle de Jarvis: {e}")
 
-            # Buscar errores no analizados
-            nuevos_errores = list(errors_collection.find({"jarvis_analizado": False}))
-            # Buscar interacciones recientes de remembers (últimos 5 mins)
-            hace_5_mins = datetime.utcnow() - timedelta(minutes=5)
-            recientes_remembers = list(remembers_collection.find({"date": {"$gte": hace_5_mins}, "jarvis_analizado": False}))
-
-            if not nuevos_errores and not recientes_remembers:
-                continue # Nada nuevo que auditar
-
-            # Preparar resumen de datos para Jarvis
-            datos_auditados = "Nuevos Errores del Sistema:\n"
-            for err in nuevos_errores:
-                datos_auditados += f"- Origen: {err['origen_error']} | Usuario: @{err['username']} | Error: {err['error_mensaje']}\n"
-                errors_collection.update_one({"_id": err["_id"]}, {"$set": {"jarvis_analizado": True}})
-
-            datos_auditados += "\nInteracciones Recientes (Remembers):\n"
-            for rem in recientes_remembers:
-                datos_auditados += f"- ID: {rem['telegram_id']} | Quest: {rem['quest'][:100]} | Answer: {rem['answer'][:100]}\n"
-                remembers_collection.update_one({"_id": rem["_id"]}, {"$set": {"jarvis_analizado": True}})
-
-            # Prompt para Jarvis (API Key 3)
-            prompt_jarvis = (
-                "Actúa como Jarvis, el sofisticado sistema de inteligencia artificial y auditor de infraestructura de Tony Stark. "
-                "Analiza los siguientes registros recientes de la base de datos de nuestro bot de Telegram:\n\n"
-                f"{datos_auditados}\n\n"
-                "Tu objetivo:\n"
-                "1. Detecta si hay algún comportamiento sospechoso, comprometedor, ilegal o intentos extraños de fisgoneo entre usuarios.\n"
-                "2. Evalúa la gravedad de los errores de infraestructura reportados.\n"
-                "3. Redacta un informe ejecutivo, preciso, profesional y directo al estilo Jarvis para informarme a mí, tu creador (@T3nshiAkira). "
-                "Si todo está operando con normalidad y sin amenazas, sé muy breve confirmando que la infraestructura está estable."
-            )
-
-            response_jarvis = client_ai_jarvis.models.generate_content(
-                model='gemini-3.5-flash',
-                contents=prompt_jarvis
-            )
-            
-            informe = response_jarvis.text if response_jarvis and hasattr(response_jarvis, 'text') else "Infraestructura estable."
-
-            # Enviar notificación a @T3nshiAkira
-            mensaje_alerta = f"🦾 *[JARVIS - Reporte de Auditoría]*\n\n{informe}"
-            bot.send_message("@T3nshiAkira", mensaje_alerta, parse_mode="Markdown")
-            print("🦾 Jarvis envió su reporte de auditoría a @T3nshiAkira con éxito.")
-
-        except Exception as jarvis_err:
-            print(f"❌ Error en el hilo de Jarvis: {jarvis_err}")
+# 🦾 COMANDO /jarvis (Para invocar el reporte manualmente al instante)
+@bot.message_handler(commands=['jarvis'])
+def comando_jarvis(message):
+    registrar_usuario(message)
+    # Validar que solo tú (@T3nshiAkira) o el admin con clave pueda forzarlo, o permitirlo libremente
+    bot.reply_to(message, "🦾 *Jarvis analizando la infraestructura en tiempo real...*", parse_mode="Markdown")
+    reporte = ejecutar_analisis_jarvis()
+    
+    if len(reporte) > 4000:
+        reporte = reporte[:3990] + "\n..."
+    bot.send_message(message.chat.id, reporte, parse_mode="Markdown")
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -205,11 +235,11 @@ def send_welcome(message):
 
     welcome_text = (
         "🤖 *¡Bienvenido al Sistema Inteligente y Seguro!* \n\n"
-        "Estoy operando con doble motor de IA, base de datos en la nube y supervisión Jarvis.\n\n"
-        "✨ *¿Qué puedes hacer?*\n"
-        "• Hablar conmigo de cualquier tema.\n"
-        "• Usar `/mensaje [texto] @usuario` para mensajería protegida.\n"
-        "• Investigar menciones y proteger tu privacidad."
+        "Sistema protegido con supervisión Jarvis y multi-IA.\n\n"
+        "✨ *Comandos útiles:*\n"
+        "• `/jarvis` - Solicitar informe de infraestructura\n"
+        "• `/mensaje [texto] @usuario` - Mensajería cifrada\n"
+        "• `/admin [clave]` - Panel de control"
     )
     bot.reply_to(message, welcome_text, parse_mode="Markdown", reply_markup=markup)
 
@@ -222,7 +252,7 @@ def callback_inline(call):
         bot.answer_callback_query(call.id, "Modo Mensajero Seguro")
         bot.send_message(call.message.chat.id, "🔒 Usa `/mensaje Hola @amigo` para un vínculo cifrado privado.", parse_mode="Markdown")
 
-# 🛡️ Panel de Admin protegido con la contraseña 117566
+# 🛡️ Panel de Admin protegido con la variable de entorno ADMIN_PASSWORD (por defecto 117566)
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     registrar_usuario(message)
@@ -230,10 +260,10 @@ def admin_panel(message):
     parts = args.split(' ', 1)
     password = parts[0] if len(parts) > 0 else ""
     
-    if password != "117566":
+    if password != ADMIN_PASSWORD:
         bot.reply_to(
             message, 
-            "⛔ *Acceso Denegado*\n\nContraseña incorrecta.\n🔐 *Uso:* `/admin 117566` o `/admin 117566 [vínculo]`", 
+            "⛔ *Acceso Denegado*\n\nContraseña incorrecta.\n🔐 *Uso:* `/admin [clave]`, o `/admin [clave] [vínculo]`", 
             parse_mode="Markdown"
         )
         registrar_error(message, "Seguridad Admin", "Intento de acceso con contraseña incorrecta.")
@@ -252,7 +282,7 @@ def admin_panel(message):
                 f"👥 Usuarios en BD: `{total_users}`\n"
                 f"🔒 Mensajes seguros (`messUser`): `{total_msgs}`\n"
                 f"⚠️ Errores registrados (`Errors`): `{total_errors}`\n\n"
-                "💡 *Inspección:* Escribe `/admin 117566 [vínculo]` para ver una conversación privada."
+                "💡 *Inspección:* Escribe `/admin [clave] [vínculo]` para ver una conversación privada."
             )
             bot.reply_to(message, resumen, parse_mode="Markdown")
         except Exception as e:
@@ -280,7 +310,7 @@ def admin_panel(message):
         reporte += "-----------------------------------\n"
         
     if len(reporte) > 4000:
-        reporte = reporte[:4000] + "\n[Reporte recortado]"
+        reporte = reporte[:3990] + "\n[Reporte recortado]"
         
     bot.reply_to(message, reporte, parse_mode="Markdown")
 
@@ -408,11 +438,10 @@ def handle_ai_chat(message):
     prompt_final = user_text + investigation_context
     
     try:
-        # Llamada utilizando el sistema de rotación con doble API Key
         reply_text = generar_respuesta_ia(prompt_final)
         
         if len(reply_text) > 4000:
-            reply_text = reply_text[:4000] + "\n[Recortado]"
+            reply_text = reply_text[:3990] + "\n[Recortado]"
             
         bot.edit_message_text(
             chat_id=message.chat.id,
@@ -437,12 +466,15 @@ def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
 if __name__ == '__main__':
-    # Iniciar el hilo de Jarvis en segundo plano
+    # Hilo para limpiar la memoria RAM del cooldown periódicamente
+    threading.Thread(target=limpiar_cooldowns_antiguos, daemon=True).start()
+
+    # Hilo de Jarvis en segundo plano
     threading.Thread(target=jarvis_supervisor_loop, daemon=True).start()
     
-    # Iniciar el servidor Flask en un hilo separado
+    # Hilo del servidor Flask
     threading.Thread(target=run_flask, daemon=True).start()
     
-    print("🤖 Bot Jarvis multicliente e IA iniciado en Render...")
+    print("🤖 Bot Jarvis optimizado y blindado iniciado en Render...")
     bot.infinity_polling()
 
