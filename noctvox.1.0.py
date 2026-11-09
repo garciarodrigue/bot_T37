@@ -15,10 +15,17 @@ MONGO_URI = os.environ.get('MONGO_URI')
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client_ai = genai.Client(api_key=GEMINI_API_KEY)
 
-# Configuración de MongoDB Atlas (Base de datos y colección explícitas)
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["telegram_bot_db"]
-users_collection = db["usuarios"]
+# Configuración segura de MongoDB Atlas con manejo de errores de conexión
+try:
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    # Forzar una comprobación de ping para validar credenciales y red
+    mongo_client.admin.command('ping')
+    db = mongo_client["telegram_bot_db"]
+    users_collection = db["usuarios"]
+    print("✅ ¡Conexión exitosa con MongoDB Atlas!")
+except Exception as e:
+    print(f"❌ Error crítico conectando a MongoDB Atlas: {e}")
+    users_collection = None
 
 # Servidor Flask para mantener el servicio web activo en Render
 app = Flask('')
@@ -28,7 +35,11 @@ def home():
     return "Bot con IA y MongoDB en Render activo y operando 24/7."
 
 def registrar_usuario(message):
-    """Guarda o actualiza la información del usuario en MongoDB Atlas automáticamente"""
+    """Guarda o actualiza la información del usuario en MongoDB Atlas"""
+    if users_collection is None:
+        print("⚠️ No hay conexión activa a MongoDB, omitiendo guardado.")
+        return
+
     try:
         user = message.from_user
         user_data = {
@@ -40,8 +51,7 @@ def registrar_usuario(message):
             "last_interaction": datetime.utcnow()
         }
         
-        # Inserta si es nuevo o actualiza los datos si ya existe (upsert)
-        users_collection.update_one(
+        result = users_collection.update_one(
             {"telegram_id": user.id},
             {
                 "$set": user_data,
@@ -49,16 +59,16 @@ def registrar_usuario(message):
             },
             upsert=True
         )
-        print(f"✅ Usuario {user.id} (@{user.username}) registrado/actualizado en MongoDB.")
+        print(f"✅ Usuario {user.id} (@{user.username}) procesado en MongoDB correctamente.")
     except Exception as e:
-        print(f"❌ Error al guardar usuario en MongoDB: {e}")
+        print(f"❌ Error al ejecutar update_one en MongoDB: {e}")
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     registrar_usuario(message)
     welcome_text = (
         "🤖 *¡Hola! Soy tu bot con IA (Gemini) y base de datos en la nube.*\n\n"
-        "Estoy ejecutándome 24/7 en Render y guardando tu registro en MongoDB Atlas.\n"
+        "Estoy ejecutándome 24/7 en Render.\n"
         "Escríbeme cualquier pregunta o tarea y te responderé con IA."
     )
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
@@ -72,7 +82,6 @@ def handle_ai_chat(message):
     processing_msg = bot.reply_to(message, "🧠 Pensando respuesta...")
     
     try:
-        # Generar respuesta usando el modelo activo en tu cuenta
         response = client_ai.models.generate_content(
             model='gemini-3.5-flash',
             contents=user_text
@@ -102,7 +111,6 @@ def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
 if __name__ == '__main__':
-    # Iniciar Flask en un hilo separado para cumplir con los requisitos de puertos de Render
     threading.Thread(target=run_flask).start()
     print("Bot con MongoDB Atlas e IA iniciado en Render...")
     bot.infinity_polling()
