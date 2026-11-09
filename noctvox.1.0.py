@@ -5,17 +5,23 @@ import telebot
 from flask import Flask
 from google import genai
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 
 # Cargar credenciales desde las variables de entorno de Render
 TELEGRAM_TOKEN = os.environ.get('BOT_TOKEN')
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 MONGO_URI = os.environ.get('MONGO_URI')
 
-# Inicializar Telegram y el cliente oficial de Gemini
+# 🔑 Configuración de las 3 API Keys de Gemini (Cuentas separadas)
+API_KEY_1 = os.environ.get('GEMINI_API_KEY')
+API_KEY_2 = os.environ.get('GEMINI_API_KEY_2') or API_KEY_1
+API_KEY_3 = os.environ.get('GEMINI_API_KEY_3') or API_KEY_1
+
+# Inicializar clientes de Gemini separados para cada rol
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-client_ai = genai.Client(api_key=GEMINI_API_KEY)
+client_ai_primary = genai.Client(api_key=API_KEY_1)
+client_ai_backup = genai.Client(api_key=API_KEY_2)
+client_ai_jarvis = genai.Client(api_key=API_KEY_3)
 
 # Configurar el menú de comandos oficial en Telegram
 try:
@@ -44,7 +50,7 @@ except Exception as e:
     messuser_collection = None
     errors_collection = None
 
-# Diccionario para controlar el límite de mensajes por usuario (Cooldown de 5 segundos)
+# Diccionario para controlar el cooldown de usuarios (5 segundos)
 user_cooldowns = {}
 
 # Servidor Flask para mantener el servicio web activo en Render
@@ -52,7 +58,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot avanzado con IA, seguridad y MongoDB en Render activo 24/7."
+    return "Bot Jarvis con multi-IA y MongoDB en Render activo 24/7."
 
 def registrar_usuario(message):
     """Guarda o actualiza la información general del usuario"""
@@ -88,7 +94,8 @@ def registrar_error(message, origen, error_detalle):
             "prompt_o_comando": message.text if message and hasattr(message, 'text') else "N/A",
             "origen_error": origen,
             "error_mensaje": str(error_detalle),
-            "date": datetime.utcnow()
+            "date": datetime.utcnow(),
+            "jarvis_analizado": False  # Para que Jarvis sepa que es nuevo
         }
         errors_collection.insert_one(error_doc)
         print(f"⚠️ Error registrado en Errors [{origen}]")
@@ -104,17 +111,93 @@ def guardar_remember(user_id, quest, answer):
             "telegram_id": user_id,
             "quest": quest,
             "answer": answer,
-            "date": datetime.utcnow()
+            "date": datetime.utcnow(),
+            "jarvis_analizado": False
         }
         remembers_collection.insert_one(remember_data)
     except Exception as e:
         print(f"❌ Error al guardar en remembers: {e}")
 
+# 🤖 SISTEMA DE ROTACIÓN INTELIGENTE DE API KEYS PARA CHAT
+def generar_respuesta_ia(prompt_final):
+    """Intenta con la Key principal, si falla, rota automáticamente a la Key de respaldo"""
+    try:
+        response = client_ai_primary.models.generate_content(
+            model='gemini-3.5-flash',
+            contents=prompt_final
+        )
+        return response.text if response and hasattr(response, 'text') else "No se obtuvo respuesta."
+    except Exception as e_primary:
+        print(f"⚠️ API Key Principal falló. Rotando a Key de respaldo... Error: {e_primary}")
+        try:
+            response = client_ai_backup.models.generate_content(
+                model='gemini-3.5-flash',
+                contents=prompt_final
+            )
+            return response.text if response and hasattr(response, 'text') else "No se obtuvo respuesta (Backup)."
+        except Exception as e_backup:
+            raise Exception(f"Ambas API Keys fallaron. Principal: {e_primary} | Respaldo: {e_backup}")
+
+# 🦾 JARVIS: HILO DE MONITOREO Y AUDITORÍA EN SEGUNDO PLANO
+def jarvis_supervisor_loop():
+    """Ejecuta un ciclo cada 5 minutos analizando la BD con la 3era API Key y reportando a @T3nshiAkira"""
+    print("🦾 Jarvis Supervisor iniciado en segundo plano...")
+    while True:
+        time.sleep(300) # Espera 5 minutos entre revisiones
+        try:
+            if errors_collection is None or remembers_collection is None:
+                continue
+
+            # Buscar errores no analizados
+            nuevos_errores = list(errors_collection.find({"jarvis_analizado": False}))
+            # Buscar interacciones recientes de remembers (últimos 5 mins)
+            hace_5_mins = datetime.utcnow() - timedelta(minutes=5)
+            recientes_remembers = list(remembers_collection.find({"date": {"$gte": hace_5_mins}, "jarvis_analizado": False}))
+
+            if not nuevos_errores and not recientes_remembers:
+                continue # Nada nuevo que auditar
+
+            # Preparar resumen de datos para Jarvis
+            datos_auditados = "Nuevos Errores del Sistema:\n"
+            for err in nuevos_errores:
+                datos_auditados += f"- Origen: {err['origen_error']} | Usuario: @{err['username']} | Error: {err['error_mensaje']}\n"
+                errors_collection.update_one({"_id": err["_id"]}, {"$set": {"jarvis_analizado": True}})
+
+            datos_auditados += "\nInteracciones Recientes (Remembers):\n"
+            for rem in recientes_remembers:
+                datos_auditados += f"- ID: {rem['telegram_id']} | Quest: {rem['quest'][:100]} | Answer: {rem['answer'][:100]}\n"
+                remembers_collection.update_one({"_id": rem["_id"]}, {"$set": {"jarvis_analizado": True}})
+
+            # Prompt para Jarvis (API Key 3)
+            prompt_jarvis = (
+                "Actúa como Jarvis, el sofisticado sistema de inteligencia artificial y auditor de infraestructura de Tony Stark. "
+                "Analiza los siguientes registros recientes de la base de datos de nuestro bot de Telegram:\n\n"
+                f"{datos_auditados}\n\n"
+                "Tu objetivo:\n"
+                "1. Detecta si hay algún comportamiento sospechoso, comprometedor, ilegal o intentos extraños de fisgoneo entre usuarios.\n"
+                "2. Evalúa la gravedad de los errores de infraestructura reportados.\n"
+                "3. Redacta un informe ejecutivo, preciso, profesional y directo al estilo Jarvis para informarme a mí, tu creador (@T3nshiAkira). "
+                "Si todo está operando con normalidad y sin amenazas, sé muy breve confirmando que la infraestructura está estable."
+            )
+
+            response_jarvis = client_ai_jarvis.models.generate_content(
+                model='gemini-3.5-flash',
+                contents=prompt_jarvis
+            )
+            
+            informe = response_jarvis.text if response_jarvis and hasattr(response_jarvis, 'text') else "Infraestructura estable."
+
+            # Enviar notificación a @T3nshiAkira
+            mensaje_alerta = f"🦾 *[JARVIS - Reporte de Auditoría]*\n\n{informe}"
+            bot.send_message("@T3nshiAkira", mensaje_alerta, parse_mode="Markdown")
+            print("🦾 Jarvis envió su reporte de auditoría a @T3nshiAkira con éxito.")
+
+        except Exception as jarvis_err:
+            print(f"❌ Error en el hilo de Jarvis: {jarvis_err}")
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     registrar_usuario(message)
-    
-    # Teclado estético con botones interactivos (Inline Keyboard)
     markup = telebot.types.InlineKeyboardMarkup()
     btn_help = telebot.types.InlineKeyboardButton("💡 ¿Cómo usar?", callback_data="help_info")
     btn_secure = telebot.types.InlineKeyboardButton("🔒 Mensaje Cifrado", callback_data="secure_info")
@@ -122,7 +205,7 @@ def send_welcome(message):
 
     welcome_text = (
         "🤖 *¡Bienvenido al Sistema Inteligente y Seguro!* \n\n"
-        "Estoy operando 24/7 con Inteligencia Artificial y base de datos en la nube.\n\n"
+        "Estoy operando con doble motor de IA, base de datos en la nube y supervisión Jarvis.\n\n"
         "✨ *¿Qué puedes hacer?*\n"
         "• Hablar conmigo de cualquier tema.\n"
         "• Usar `/mensaje [texto] @usuario` para mensajería protegida.\n"
@@ -132,39 +215,33 @@ def send_welcome(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_inline(call):
-    """Maneja los clics de los botones interactivos estéticos"""
     if call.data == "help_info":
-        bot.answer_callback_query(call.id, "¡Simplemente escríbeme cualquier pregunta en el chat!")
-        bot.send_message(call.message.chat.id, "💡 *Ayuda rápida:* Escribe directamente tu pregunta o dilema y te responderé usando Gemini IA.", parse_mode="Markdown")
+        bot.answer_callback_query(call.id, "¡Escríbeme cualquier pregunta!")
+        bot.send_message(call.message.chat.id, "💡 Escribe directamente tu pregunta y te responderé usando IA.", parse_mode="Markdown")
     elif call.data == "secure_info":
-        bot.answer_callback_query(call.id, "Modo Mensajero Seguro activado")
-        bot.send_message(call.message.chat.id, "🔒 *Mensajería Segura:* Usa el comando `/mensaje Hola @amigo` para crear un vínculo cifrado privado.", parse_mode="Markdown")
+        bot.answer_callback_query(call.id, "Modo Mensajero Seguro")
+        bot.send_message(call.message.chat.id, "🔒 Usa `/mensaje Hola @amigo` para un vínculo cifrado privado.", parse_mode="Markdown")
 
 # 🛡️ Panel de Admin protegido con la contraseña 117566
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     registrar_usuario(message)
-    
     args = message.text.replace('/admin', '').strip()
     parts = args.split(' ', 1)
     password = parts[0] if len(parts) > 0 else ""
     
-    # Validación estricta de la contraseña de administrador
     if password != "117566":
         bot.reply_to(
             message, 
-            "⛔ *Acceso Denegado*\n\n"
-            "La contraseña de administrador es incorrecta o no fue proporcionada.\n"
-            "🔐 *Uso correcto:* `/admin 117566` o `/admin 117566 [vínculo]`", 
+            "⛔ *Acceso Denegado*\n\nContraseña incorrecta.\n🔐 *Uso:* `/admin 117566` o `/admin 117566 [vínculo]`", 
             parse_mode="Markdown"
         )
-        registrar_error(message, "Seguridad Admin", "Intento de acceso al panel con contraseña incorrecta.")
+        registrar_error(message, "Seguridad Admin", "Intento de acceso con contraseña incorrecta.")
         return
 
     sub_args = parts[1] if len(parts) > 1 else ""
     
     if not sub_args:
-        # Mostrar resumen general del sistema
         try:
             total_users = users_collection.count_documents({}) if users_collection is not None else 0
             total_msgs = messuser_collection.count_documents({}) if messuser_collection is not None else 0
@@ -175,14 +252,13 @@ def admin_panel(message):
                 f"👥 Usuarios en BD: `{total_users}`\n"
                 f"🔒 Mensajes seguros (`messUser`): `{total_msgs}`\n"
                 f"⚠️ Errores registrados (`Errors`): `{total_errors}`\n\n"
-                "💡 *Inspección:* Escribe `/admin 117566 [vínculo]` (ej: `/admin 117566 MarEdu`) para ver una conversación privada."
+                "💡 *Inspección:* Escribe `/admin 117566 [vínculo]` para ver una conversación privada."
             )
             bot.reply_to(message, resumen, parse_mode="Markdown")
         except Exception as e:
             bot.reply_to(message, f"❌ Error al consultar estadísticas: {e}")
         return
 
-    # Buscar el vínculo seguro en messUser
     vinculo_buscado = sub_args
     if messuser_collection is None:
         bot.reply_to(message, "❌ Base de datos no conectada.")
@@ -244,7 +320,6 @@ def handle_secure_message(message):
     target_id = target_user_doc["telegram_id"]
     target_name = target_user_doc.get("first_name") or target_username
     
-    # Generar vínculo: 3 primeras letras de ambos nombres
     parte1 = sender_name[:3].capitalize()
     parte2 = target_name[:3].capitalize()
     vinculo_code = parte1 + parte2
@@ -263,7 +338,7 @@ def handle_secure_message(message):
         bot.reply_to(message, "❌ Hubo un error al guardar el mensaje seguro.")
         return
         
-    bot.reply_to(message, f"✅ *Mensaje seguro enviado con éxito.*\n🔗 *Vínculo generado:* `{vinculo_code}`", parse_mode="Markdown")
+    bot.reply_to(message, f"✅ *Mensaje seguro enviado con éxito.*\n🔗 *Vínculo:* `{vinculo_code}`", parse_mode="Markdown")
     
     try:
         alerta_destinatario = (
@@ -281,7 +356,7 @@ def handle_ai_chat(message):
     user_id = message.from_user.id
     current_time = time.time()
     
-    # ⏱️ SISTEMA DE LÍMITE DE MENSAJES (COOLDOWN DE 5 SEGUNDOS)
+    # ⏱️ COOLDOWN DE 5 SEGUNDOS
     if user_id in user_cooldowns:
         elapsed_time = current_time - user_cooldowns[user_id]
         if elapsed_time < 5:
@@ -324,7 +399,6 @@ def handle_ai_chat(message):
             except Exception as alert_err:
                 registrar_error(message, "Render/Telegram", f"No se pudo enviar alerta de privacidad: {str(alert_err)}")
 
-    # 💫 Mostrar estado 'Escribiendo...' de manera nativa en Telegram
     try:
         bot.send_chat_action(message.chat.id, 'typing')
     except Exception:
@@ -334,12 +408,8 @@ def handle_ai_chat(message):
     prompt_final = user_text + investigation_context
     
     try:
-        response = client_ai.models.generate_content(
-            model='gemini-3.5-flash',
-            contents=prompt_final
-        )
-        
-        reply_text = response.text if response and hasattr(response, 'text') else "No se obtuvo respuesta."
+        # Llamada utilizando el sistema de rotación con doble API Key
+        reply_text = generar_respuesta_ia(prompt_final)
         
         if len(reply_text) > 4000:
             reply_text = reply_text[:4000] + "\n[Recortado]"
@@ -350,13 +420,11 @@ def handle_ai_chat(message):
             text=reply_text
         )
         
-        # Guardar en remembers solo las interacciones de chat con IA
         guardar_remember(user_id, user_text, reply_text)
         
     except Exception as e:
         error_msg = f"❌ Error en el motor de IA: {str(e)}"
         print(error_msg)
-        # Registrar el error detallado en la colección Errors de MongoDB
         registrar_error(message, "Gemini AI", str(e))
         
         bot.edit_message_text(
@@ -369,7 +437,12 @@ def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
 if __name__ == '__main__':
-    threading.Thread(target=run_flask).start()
-    print("Bot avanzado con diseño estético, cooldown y panel seguro iniciado en Render...")
+    # Iniciar el hilo de Jarvis en segundo plano
+    threading.Thread(target=jarvis_supervisor_loop, daemon=True).start()
+    
+    # Iniciar el servidor Flask en un hilo separado
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    print("🤖 Bot Jarvis multicliente e IA iniciado en Render...")
     bot.infinity_polling()
 
