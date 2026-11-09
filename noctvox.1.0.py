@@ -2,36 +2,74 @@ import os
 import telebot
 from flask import Flask
 from google import genai
+from pymongo import MongoClient
+from datetime import datetime
 
+# Cargar credenciales desde variables de entorno de Render
 TELEGRAM_TOKEN = os.environ.get('BOT_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+MONGO_URI = os.environ.get('MONGO_URI')
 
+# Inicializar servicios
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-client = genai.Client(api_key=GEMINI_API_KEY)
+client_ai = genai.Client(api_key=GEMINI_API_KEY)
+
+# Configurar conexión a MongoDB Atlas
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client.get_database() # Toma la base de datos por defecto de la URI
+users_collection = db.users      # Colección para almacenar los usuarios
 
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot con Gemini en Render activo y operando 24/7."
+    return "Bot con IA y MongoDB en Render activo y operando 24/7."
+
+def registrar_usuario(message):
+    """Guarda o actualiza la información del usuario en MongoDB Atlas"""
+    try:
+        user = message.from_user
+        user_data = {
+            "telegram_id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "language_code": user.language_code,
+            "last_interaction": datetime.utcnow()
+        }
+        
+        # Actualiza si ya existe, o lo inserta por primera vez si es nuevo ($set / $setOnInsert)
+        users_collection.update_one(
+            {"telegram_id": user.id},
+            {
+                "$set": user_data,
+                "$setOnInsert": {"first_seen": datetime.utcnow()}
+            },
+            upsert=True
+        )
+    except Exception as e:
+        print(f"❌ Error al guardar usuario en MongoDB: {e}")
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    registrar_usuario(message)
     welcome_text = (
-        "🤖 *¡Hola! Soy tu bot con Inteligencia Artificial (Gemini).* 🚀\n\n"
-        "Estoy ejecutándome 24/7 en la nube de Render.\n"
-        "Escríbeme cualquier pregunta o tarea y te responderé con IA."
+        "🤖 *¡Hola! Soy tu bot con IA (Gemini) y base de datos en la nube.*\n\n"
+        "Estoy ejecutándome 24/7 en Render y guardando tu registro en MongoDB Atlas.\n"
+        "Escríbeme cualquier pregunta o tarea."
     )
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
 def handle_ai_chat(message):
+    # Registrar automáticamente al usuario con cada mensaje que envíe
+    registrar_usuario(message)
+    
     user_text = message.text
     processing_msg = bot.reply_to(message, "🧠 Pensando respuesta...")
     
     try:
-        # Usando el modelo exacto que está activo en tu cuenta
-        response = client.models.generate_content(
+        response = client_ai.models.generate_content(
             model='gemini-3.5-flash',
             contents=user_text
         )
@@ -62,6 +100,6 @@ def run_flask():
 if __name__ == '__main__':
     import threading
     threading.Thread(target=run_flask).start()
-    print("Bot con IA iniciado en Render...")
+    print("Bot con MongoDB Atlas e IA iniciado en Render...")
     bot.infinity_polling()
 
