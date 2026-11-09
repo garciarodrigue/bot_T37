@@ -30,9 +30,9 @@ def handle_ai_chat(message):
     processing_msg = bot.reply_to(message, "🧠 Pensando respuesta...")
     
     try:
-        # Usando el modelo de producción altamente estable
+        # Usando el modelo exacto que está activo en tu cuenta
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-3.5-flash',
             contents=user_text
         )
         
