@@ -16,27 +16,29 @@ MONGO_URI = os.environ.get('MONGO_URI')
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client_ai = genai.Client(api_key=GEMINI_API_KEY)
 
-# Configuración de MongoDB Atlas
+# Configuración de MongoDB Atlas y colecciones
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     mongo_client.admin.command('ping')
     db = mongo_client["telegram_bot_db"]
     users_collection = db["usuarios"]
     remembers_collection = db["remembers"]
-    messuser_collection = db["messUser"]  # Nueva colección para mensajes seguros
+    messuser_collection = db["messUser"]
+    errors_collection = db["Errors"]  # 🛡️ Nueva colección para registro de errores y auditoría
     print("✅ ¡Conexión exitosa con MongoDB Atlas!")
 except Exception as e:
     print(f"❌ Error crítico conectando a MongoDB Atlas: {e}")
     users_collection = None
     remembers_collection = None
     messuser_collection = None
+    errors_collection = None
 
 # Servidor Flask para mantener el servicio web activo en Render
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot mensajero seguro con IA y MongoDB en Render activo 24/7."
+    return "Bot administrador con IA y MongoDB en Render activo 24/7."
 
 def registrar_usuario(message):
     """Guarda o actualiza la información general del usuario"""
@@ -54,17 +56,33 @@ def registrar_usuario(message):
         }
         users_collection.update_one(
             {"telegram_id": user.id},
-            {
-                "$set": user_data,
-                "$setOnInsert": {"first_seen": datetime.utcnow()}
-            },
+            {"$set": user_data, "$setOnInsert": {"first_seen": datetime.utcnow()}},
             upsert=True
         )
     except Exception as e:
-        print(f"❌ Error al guardar usuario en MongoDB: {e}")
+        registrar_error(message, "Base de Datos", f"Error al registrar usuario: {str(e)}")
+
+def registrar_error(message, origen, error_detalle):
+    """Guarda de forma estructurada los errores del sistema en la colección Errors"""
+    if errors_collection is None:
+        return
+    try:
+        user = message.from_user if message and hasattr(message, 'from_user') else None
+        error_doc = {
+            "telegram_id": user.id if user else "Sistema/Desconocido",
+            "username": user.username if user and user.username else "Sin alias",
+            "prompt_o_comando": message.text if message and hasattr(message, 'text') else "N/A",
+            "origen_error": origen,  # Ej: 'Gemini AI', 'Render/Telegram', 'Base de Datos'
+            "error_mensaje": str(error_detalle),
+            "date": datetime.utcnow()
+        }
+        errors_collection.insert_one(error_doc)
+        print(f"⚠️ Error registrado en la colección Errors [{origen}]")
+    except Exception as ex:
+        print(f"❌ Falló al registrar en Errors: {ex}")
 
 def guardar_remember(user_id, quest, answer):
-    """Guarda cada pregunta, respuesta y el ID del usuario en remembers"""
+    """Guarda solo las preguntas y respuestas de IA (excluye comandos)"""
     if remembers_collection is None:
         return
     try:
@@ -82,35 +100,85 @@ def guardar_remember(user_id, quest, answer):
 def send_welcome(message):
     registrar_usuario(message)
     welcome_text = (
-        "🤖 *¡Hola! Soy tu bot mensajero y con IA en la nube.*\n\n"
-        "Comandos disponibles:\n"
-        "• Escríbeme cualquier pregunta para hablar con Gemini.\n"
-        "• `/mensaje [tu texto] @usuario` para enviar un mensaje seguro cifrado."
+        "🤖 *¡Hola! Soy tu bot con panel de administración y seguridad.*\n\n"
+        "• Escríbeme cualquier pregunta para hablar con la IA.\n"
+        "• `/mensaje [texto] @usuario` para mensajería cifrada.\n"
+        "• `/admin [vínculo]` para que el administrador revise conversaciones."
     )
-    guardar_remember(message.from_user.id, message.text, welcome_text)
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
 
-# 🔒 NUEVO: Manejador para el mensajero seguro /mensaje
+# 🔍 NUEVO: Panel de Admin para consultar vínculos y conversaciones en messUser
+@bot.message_handler(commands=['admin'])
+def admin_panel(message):
+    registrar_usuario(message)
+    
+    # Opcional: Puedes restringir esto poniendo tu propio telegram_id de admin aquí abajo
+    # ADMIN_ID = 123456789
+    # if message.from_user.id != ADMIN_ID:
+    #     bot.reply_to(message, "⛔ No tienes permisos de administrador.")
+    #     return
+
+    args = message.text.replace('/admin', '').strip()
+    
+    if not args:
+        # Si no pone argumentos, mostrar resumen rápido de la BD
+        try:
+            total_users = users_collection.count_documents({}) if users_collection is not None else 0
+            total_msgs = messuser_collection.count_documents({}) if messuser_collection is not None else 0
+            total_errors = errors_collection.count_documents({}) if errors_collection is not None else 0
+            
+            resumen = (
+                "🛠️ *Panel de Administración - Resumen*\n\n"
+                f"👥 Usuarios registrados: `{total_users}`\n"
+                f"🔒 Mensajes seguros (`messUser`): `{total_msgs}`\n"
+                f"⚠️ Errores registrados (`Errors`): `{total_errors}`\n\n"
+                "💡 *Uso:* Escribe `/admin [vínculo]` (ej: `/admin MarEdu`) para inspeccionar un chat seguro específico."
+            )
+            bot.reply_to(message, resumen, parse_mode="Markdown")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Error al consultar estadísticas: {e}")
+        return
+
+    # Si proporcionó un vínculo, buscar en messUser
+    vinculo_buscado = args
+    if messuser_collection is None:
+        bot.reply_to(message, "❌ Base de datos no conectada.")
+        return
+        
+    cursor_mensajes = messuser_collection.find({"vínculo": {"$regex": f"^{vinculo_buscado}$", "$options": "i"}}).sort("date", 1)
+    mensajes = list(cursor_mensajes)
+    
+    if not mensajes:
+        bot.reply_to(message, f"🔍 No se encontraron registros con el vínculo: `{vinculo_buscado}`", parse_mode="Markdown")
+        return
+        
+    reporte = f"📂 *Auditoría del Vínculo: `{vinculo_buscado}`*\n\n"
+    for m in mensajes:
+        fecha_str = m['date'].strftime('%Y-%m-%d %H:%M:%S')
+        reporte += f"👤 **De:** {m['name']} ➡️ **Para:** {m['To']}\n"
+        reporte += f"💬 **Mensaje:** `{m['ms']}`\n"
+        reporte += f"🕒 *Fecha (UTC):* {fecha_str}\n"
+        reporte += "-----------------------------------\n"
+        
+    if len(reporte) > 4000:
+        reporte = reporte[:4000] + "\n[Reporte recortado]"
+        
+    bot.reply_to(message, reporte, parse_mode="Markdown")
+
 @bot.message_handler(commands=['mensaje'])
 def handle_secure_message(message):
     registrar_usuario(message)
-    
     sender = message.from_user
     sender_name = sender.first_name or sender.username or "Usuario"
     
-    # Extraer el texto después del comando /mensaje
     full_text = message.text.replace('/mensaje', '').strip()
-    
-    # Buscar si incluye un @usuario al final o en el texto
     mencionados = re.findall(r'@([a-zA-Z0-9_]+)', full_text)
     
     if not mencionados:
-        bot.reply_to(message, "⚠️ Formato incorrecto. Debes usar: `/mensaje Hola cómo estás @usuario`", parse_mode="Markdown")
+        bot.reply_to(message, "⚠️ Formato incorrecto. Usa: `/mensaje [texto] @usuario`", parse_mode="Markdown")
         return
         
     target_username = mencionados[0]
-    
-    # Remover el @usuario del contenido del mensaje para limpiar el texto (ms)
     mensaje_contenido = re.sub(r'@[a-zA-Z0-9_]+', '', full_text).strip()
     
     if not mensaje_contenido:
@@ -118,27 +186,26 @@ def handle_secure_message(message):
         return
 
     if users_collection is None or messuser_collection is None:
+        registrar_error(message, "Base de Datos", "Colecciones nulas al intentar enviar mensaje seguro.")
         bot.reply_to(message, "❌ Error de conexión con la base de datos.")
         return
 
-    # Buscar al usuario destinatario en la BD
     target_user_doc = users_collection.find_one({
         "username": {"$regex": f"^{target_username}$", "$options": "i"}
     })
     
     if not target_user_doc:
-        bot.reply_to(message, f"❌ No se encontró al usuario @{target_username} registrado en la base de datos del bot.")
+        bot.reply_to(message, f"❌ No se encontró al usuario @{target_username} registrado.")
         return
         
     target_id = target_user_doc["telegram_id"]
     target_name = target_user_doc.get("first_name") or target_username
     
-    # Generar la clave vínculo: 3 primeras letras del remitente + 3 primeras letras del destinatario
+    # Generar vínculo: 3 primeras letras de ambos nombres
     parte1 = sender_name[:3].capitalize()
     parte2 = target_name[:3].capitalize()
     vinculo_code = parte1 + parte2
     
-    # Guardar en la colección messUser
     try:
         mess_data = {
             "vínculo": vinculo_code,
@@ -148,16 +215,13 @@ def handle_secure_message(message):
             "date": datetime.utcnow()
         }
         messuser_collection.insert_one(mess_data)
-        print(f"🔒 Mensaje seguro guardado en messUser con vínculo: {vinculo_code}")
     except Exception as db_err:
-        print(f"❌ Error al guardar en messUser: {db_err}")
+        registrar_error(message, "Base de Datos", f"Fallo al insertar en messUser: {str(db_err)}")
         bot.reply_to(message, "❌ Hubo un error al guardar el mensaje seguro.")
         return
         
-    # Notificar al remitente que se envió con éxito
-    bot.reply_to(message, f"✅ *Mensaje enviado y protegido con éxito.*\n🔗 *Vínculo generado:* `{vinculo_code}`", parse_mode="Markdown")
+    bot.reply_to(message, f"✅ *Mensaje enviado y protegido.*\n🔗 *Vínculo:* `{vinculo_code}`", parse_mode="Markdown")
     
-    # Enviar notificación segura al destinatario
     try:
         alerta_destinatario = (
             f"🔒 *Nuevo mensaje seguro recibido*\n\n"
@@ -167,20 +231,18 @@ def handle_secure_message(message):
         )
         bot.send_message(target_id, alerta_destinatario, parse_mode="Markdown")
     except Exception as send_err:
-        print(f"⚠️ No se pudo notificar al usuario {target_id}: {send_err}")
+        registrar_error(message, "Render/Telegram", f"Fallo al enviar notificación al target_id {target_id}: {str(send_err)}")
 
-# Manejador general de IA y menciones de investigación previas
 @bot.message_handler(func=lambda message: True)
 def handle_ai_chat(message):
     registrar_usuario(message)
-    
     user_id = message.from_user.id
     user_text = message.text
     sender_name = message.from_user.first_name or f"@{message.from_user.username}" or "Alguien"
     
     mencionados = re.findall(r'@([a-zA-Z0-9_]{5,32})', user_text)
-    
     investigation_context = ""
+    
     if mencionados and users_collection is not None and remembers_collection is not None:
         target_username = mencionados[0]
         target_user_doc = users_collection.find_one({
@@ -205,7 +267,7 @@ def handle_ai_chat(message):
                 alerta_msg = f"⚠️ *Aviso de seguridad/privacidad:* El usuario *{sender_name}* ha estado preguntando por ti recientemente."
                 bot.send_message(target_id, alerta_msg, parse_mode="Markdown")
             except Exception as alert_err:
-                print(f"⚠️ Alerta no enviada: {alert_err}")
+                registrar_error(message, "Render/Telegram", f"No se pudo enviar alerta de privacidad: {str(alert_err)}")
 
     processing_msg = bot.reply_to(message, "🧠 Procesando...")
     prompt_final = user_text + investigation_context
@@ -219,7 +281,7 @@ def handle_ai_chat(message):
         reply_text = response.text if response and hasattr(response, 'text') else "No se obtuvo respuesta."
         
         if len(reply_text) > 4000:
-            reply_text = reply_text[:4000] + "\n\n[Recortado]"
+            reply_text = reply_text[:4000] + "\n[Recortado]"
             
         bot.edit_message_text(
             chat_id=message.chat.id,
@@ -227,11 +289,15 @@ def handle_ai_chat(message):
             text=reply_text
         )
         
+        # 💡 Guardar en remembers SOLAMENTE si es chat con IA (excluyendo comandos puros)
         guardar_remember(user_id, user_text, reply_text)
         
     except Exception as e:
         error_msg = f"❌ Error de IA: {str(e)}"
         print(error_msg)
+        # Registrar el error detallado en la colección Errors de MongoDB
+        registrar_error(message, "Gemini AI", str(e))
+        
         bot.edit_message_text(
             chat_id=message.chat.id,
             message_id=processing_msg.message_id,
@@ -243,6 +309,6 @@ def run_flask():
 
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
-    print("Bot con mensajero seguro e IA iniciado en Render...")
+    print("Bot administrador con MongoDB Atlas e IA iniciado en Render...")
     bot.infinity_polling()
 
