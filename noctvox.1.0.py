@@ -11,7 +11,7 @@ import threading
 # Cargar credenciales desde las variables de entorno de Render
 TELEGRAM_TOKEN = os.environ.get('BOT_TOKEN')
 MONGO_URI = os.environ.get('MONGO_URI')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD') or "117566" # Respaldo por defecto si no se configura
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD') or "117566"
 
 # 🔑 Configuración de las 3 API Keys de Gemini
 API_KEY_1 = os.environ.get('GEMINI_API_KEY')
@@ -28,7 +28,7 @@ client_ai_jarvis = genai.Client(api_key=API_KEY_3)
 try:
     bot.set_my_commands([
         telebot.types.BotCommand("start", "🌟 Iniciar el bot y ver opciones"),
-        telebot.types.BotCommand("jarvis", "🦾 Forzar reporte de auditoría de Jarvis"),
+        telebot.types.BotCommand("jarvis", "🦾 Informe de auditoría Jarvis (Solo Root)"),
         telebot.types.BotCommand("mensaje", "🔒 Enviar mensaje seguro cifrado (@usuario)"),
         telebot.types.BotCommand("admin", "🛡️ Panel de administración (Requiere clave)")
     ])
@@ -44,6 +44,18 @@ try:
     remembers_collection = db["remembers"]
     messuser_collection = db["messUser"]
     errors_collection = db["Errors"]
+    root_collection = db["root"]  # 👑 Nueva colección para administradores y usuarios root
+    
+    # Asegurar que tú (@T3nshiAkira) estés registrado por defecto en la colección root
+    if root_collection.count_documents({"username": "T3nshiAkira"}) == 0:
+        root_collection.insert_one({
+            "telegram_id": 0, # Se actualizará al primer contacto
+            "username": "T3nshiAkira",
+            "rol": "Creador / SuperRoot",
+            "date_added": datetime.utcnow()
+        })
+        print("👑 Creador @T3nshiAkira registrado exitosamente en la colección root.")
+
     print("✅ ¡Conexión exitosa con MongoDB Atlas!")
 except Exception as e:
     print(f"❌ Error crítico conectando a MongoDB Atlas: {e}")
@@ -51,29 +63,26 @@ except Exception as e:
     remembers_collection = None
     messuser_collection = None
     errors_collection = None
+    root_collection = None
 
-# Diccionario inteligente para el Cooldown (con control de fugas de memoria RAM)
+# Diccionario inteligente para el Cooldown
 user_cooldowns = {}
 
 def limpiar_cooldowns_antiguos():
-    """Limpia periódicamente la memoria RAM de usuarios inactivos para evitar fugas"""
     while True:
-        time.sleep(600) # Cada 10 minutos
+        time.sleep(600)
         ahora = time.time()
-        # Elimina registros mayores a 10 minutos sin actividad
         inactivos = [uid for uid, timestamp in user_cooldowns.items() if ahora - timestamp > 600]
         for uid in inactivos:
             del user_cooldowns[uid]
 
-# Servidor Flask para mantener el servicio web activo en Render
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot Jarvis con multi-IA y MongoDB en Render activo 24/7."
+    return "Bot Jarvis con multi-IA y seguridad Root MongoDB activo 24/7."
 
 def registrar_usuario(message):
-    """Guarda o actualiza la información general del usuario"""
     if users_collection is None:
         return
     try:
@@ -95,7 +104,6 @@ def registrar_usuario(message):
         registrar_error(message, "Base de Datos", f"Error al registrar usuario: {str(e)}")
 
 def registrar_error(message, origen, error_detalle):
-    """Guarda de forma estructurada los errores del sistema en la colección Errors"""
     if errors_collection is None:
         return
     try:
@@ -115,7 +123,6 @@ def registrar_error(message, origen, error_detalle):
         print(f"❌ Falló al registrar en Errors: {ex}")
 
 def guardar_remember(user_id, quest, answer):
-    """Guarda solo las preguntas y respuestas de IA (excluye comandos)"""
     if remembers_collection is None:
         return
     try:
@@ -130,8 +137,16 @@ def guardar_remember(user_id, quest, answer):
     except Exception as e:
         print(f"❌ Error al guardar en remembers: {e}")
 
+def es_usuario_root(username):
+    """Verifica si el usuario está registrado en la colección root de MongoDB"""
+    if root_collection is None or not username:
+        return False
+    # Limpiar el @ si lo tuviera guardado
+    clean_username = username.lstrip('@')
+    doc = root_collection.find_one({"username": {"$regex": f"^{clean_username}$", "$options": "i"}})
+    return doc is not None
+
 def generar_respuesta_ia(prompt_final):
-    """Rotación inteligente considerando excepciones de red/límite vs seguridad"""
     try:
         response = client_ai_primary.models.generate_content(
             model='gemini-3.5-flash',
@@ -139,7 +154,6 @@ def generar_respuesta_ia(prompt_final):
         )
         return response.text if response and hasattr(response, 'text') else "No se obtuvo respuesta."
     except Exception as e_primary:
-        # Si el error es por bloqueo de seguridad, la key 2 dará el mismo error, pero intentamos igual por robustez
         print(f"⚠️ API Key Principal falló. Rotando a Key de respaldo... Error: {e_primary}")
         try:
             response = client_ai_backup.models.generate_content(
@@ -150,9 +164,7 @@ def generar_respuesta_ia(prompt_final):
         except Exception as e_backup:
             raise Exception(f"Ambas API Keys fallaron. Principal: {e_primary} | Respaldo: {e_backup}")
 
-# 🦾 FUNCIÓN CENTRAL DE JARVIS (Para usarla tanto automática como por comando)
 def ejecutar_analisis_jarvis(chat_id_destino=None):
-    """Revisa errores y remembers pendientes y genera el reporte de Jarvis"""
     try:
         if errors_collection is None or remembers_collection is None:
             return "❌ Error: Base de datos no disponible para Jarvis."
@@ -180,9 +192,8 @@ def ejecutar_analisis_jarvis(chat_id_destino=None):
             f"{datos_auditados}\n\n"
             "Tu objetivo:\n"
             "1. Detecta si hay algún comportamiento sospechoso, comprometedor, ilegal o intentos extraños de fisgoneo entre usuarios.\n"
-            "2. Evalúa la gravedad de los errores de infraestructura reportados.\n"
-            "3. Redacta un informe ejecutivo, preciso, profesional y directo al estilo Jarvis. "
-            "Si todo está operando con normalidad y sin amenazas, sé muy breve confirmando que la infraestructura está estable."
+            "2. Evalúa la gravedad de los errores de infraestructura reportados (como fallos de cuota o excepciones).\n"
+            "3. Redacta un informe ejecutivo, preciso, profesional y directo al estilo Jarvis para el creador (@T3nshiAkira)."
         )
 
         response_jarvis = client_ai_jarvis.models.generate_content(
@@ -202,22 +213,26 @@ def ejecutar_analisis_jarvis(chat_id_destino=None):
         return f"❌ Error ejecutando a Jarvis: {jarvis_err}"
 
 def jarvis_supervisor_loop():
-    """Ciclo en segundo plano cada 5 minutos"""
     print("🦾 Jarvis Supervisor iniciado en segundo plano...")
     while True:
         time.sleep(300)
         try:
-            # Ejecuta y envía reporte automático a @T3nshiAkira
             ejecutar_analisis_jarvis("@T3nshiAkira")
             print("🦾 Jarvis envió su reporte automático con éxito.")
         except Exception as e:
             print(f"❌ Error en bucle de Jarvis: {e}")
 
-# 🦾 COMANDO /jarvis (Para invocar el reporte manualmente al instante)
+# 🦾 COMANDO /jarvis (Protegido por verificación estricta en la colección root)
 @bot.message_handler(commands=['jarvis'])
 def comando_jarvis(message):
     registrar_usuario(message)
-    # Validar que solo tú (@T3nshiAkira) o el admin con clave pueda forzarlo, o permitirlo libremente
+    username = message.from_user.username
+    
+    if not es_usuario_root(username):
+        bot.reply_to(message, "⛔ *Acceso Denegado:* No tienes privilegios root para invocar a Jarvis.", parse_mode="Markdown")
+        registrar_error(message, "Seguridad Root", f"Usuario @{username} intentó usar /jarvis sin autorización.")
+        return
+
     bot.reply_to(message, "🦾 *Jarvis analizando la infraestructura en tiempo real...*", parse_mode="Markdown")
     reporte = ejecutar_analisis_jarvis()
     
@@ -237,7 +252,7 @@ def send_welcome(message):
         "🤖 *¡Bienvenido al Sistema Inteligente y Seguro!* \n\n"
         "Sistema protegido con supervisión Jarvis y multi-IA.\n\n"
         "✨ *Comandos útiles:*\n"
-        "• `/jarvis` - Solicitar informe de infraestructura\n"
+        "• `/jarvis` - Informe de infraestructura (Solo Root)\n"
         "• `/mensaje [texto] @usuario` - Mensajería cifrada\n"
         "• `/admin [clave]` - Panel de control"
     )
@@ -252,10 +267,13 @@ def callback_inline(call):
         bot.answer_callback_query(call.id, "Modo Mensajero Seguro")
         bot.send_message(call.message.chat.id, "🔒 Usa `/mensaje Hola @amigo` para un vínculo cifrado privado.", parse_mode="Markdown")
 
-# 🛡️ Panel de Admin protegido con la variable de entorno ADMIN_PASSWORD (por defecto 117566)
+# 🛡️ Panel de Admin: Si la contraseña es correcta, guarda al usuario en la colección root
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     registrar_usuario(message)
+    user = message.from_user
+    username = user.username or f"id_{user.id}"
+    
     args = message.text.replace('/admin', '').strip()
     parts = args.split(' ', 1)
     password = parts[0] if len(parts) > 0 else ""
@@ -263,11 +281,21 @@ def admin_panel(message):
     if password != ADMIN_PASSWORD:
         bot.reply_to(
             message, 
-            "⛔ *Acceso Denegado*\n\nContraseña incorrecta.\n🔐 *Uso:* `/admin [clave]`, o `/admin [clave] [vínculo]`", 
+            "⛔ *Acceso Denegado*\n\nContraseña incorrecta.\n🔐 *Uso:* `/admin [clave]` o `/admin [clave] [vínculo]`", 
             parse_mode="Markdown"
         )
-        registrar_error(message, "Seguridad Admin", "Intento de acceso con contraseña incorrecta.")
+        registrar_error(message, "Seguridad Admin", f"Intento de acceso con contraseña incorrecta por @{username}.")
         return
+
+    # 👑 Contraseña correcta: Registrar automáticamente al usuario en la colección root si no está
+    if root_collection is not None and not es_usuario_root(username):
+        root_collection.insert_one({
+            "telegram_id": user.id,
+            "username": username,
+            "rol": "Administrador Autorizado",
+            "date_added": datetime.utcnow()
+        })
+        print(f"👑 Nuevo administrador autorizado añadido a root: @{username}")
 
     sub_args = parts[1] if len(parts) > 1 else ""
     
@@ -454,27 +482,23 @@ def handle_ai_chat(message):
     except Exception as e:
         error_msg = f"❌ Error en el motor de IA: {str(e)}"
         print(error_msg)
+        # 🛡️ Registro obligatorio en Errors para que Jarvis lo detecte
         registrar_error(message, "Gemini AI", str(e))
         
         bot.edit_message_text(
             chat_id=message.chat.id,
             message_id=processing_msg.message_id,
-            text=error_msg
+            text="⚠️ El sistema de IA ha alcanzado su límite de cuota o presenta congestión temporal. Los motores de respaldo están agotados. Por favor, intenta más tarde."
         )
 
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
 if __name__ == '__main__':
-    # Hilo para limpiar la memoria RAM del cooldown periódicamente
     threading.Thread(target=limpiar_cooldowns_antiguos, daemon=True).start()
-
-    # Hilo de Jarvis en segundo plano
     threading.Thread(target=jarvis_supervisor_loop, daemon=True).start()
-    
-    # Hilo del servidor Flask
     threading.Thread(target=run_flask, daemon=True).start()
     
-    print("🤖 Bot Jarvis optimizado y blindado iniciado en Render...")
+    print("🤖 Bot Jarvis con seguridad Root MongoDB iniciado en Render...")
     bot.infinity_polling()
 
